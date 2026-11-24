@@ -2,7 +2,7 @@ import asyncio, json, logging, time
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, PollAnswer
 from config import load_config
-from database.db import save_poll, save_vote, get_expired_polls, finalize_poll
+from database.db import save_poll, save_vote, get_expired_polls, finalize_poll, get_poll_history
 
 router = Router()
 log = logging.getLogger(__name__)
@@ -58,8 +58,9 @@ async def poll_creation_step(message: Message):
 
 @router.poll_answer()
 async def on_poll_answer(answer: PollAnswer):
-    if answer.user and answer.option_ids and len(answer.option_ids)==1:
-        await save_vote(answer.poll_id, answer.user.id, answer.option_ids[0])
+    if answer.user:
+        selected = answer.option_ids[0] if len(answer.option_ids) == 1 else None
+        await save_vote(answer.poll_id, answer.user.id, selected)
 
 async def poll_closer(bot):
     while True:
@@ -79,3 +80,23 @@ async def poll_closer(bot):
                 except Exception: log.exception('Could not send poll results')
         except Exception: log.exception('Poll closer loop failed')
         await asyncio.sleep(20)
+
+@router.callback_query(F.data == 'poll:history')
+async def show_poll_history(callback: CallbackQuery):
+    if not owner(callback.from_user.id):
+        await callback.answer('Нет доступа', show_alert=True); return
+    await callback.answer()
+    if not callback.message: return
+    records = await get_poll_history()
+    if not records:
+        await callback.message.answer('📚 История голосований пока пуста.')
+        return
+    chunks = ['📚 <b>Последние голосования</b>']
+    for question, options, counts, created, status in records:
+        if counts is None:
+            lines = [f'• <b>{question}</b> — в процессе']
+        else:
+            total = sum(counts)
+            lines = [f'• <b>{question}</b>', *(f'{opt}: {cnt}' for opt,cnt in zip(options,counts)), f'Всего: {total}']
+        chunks.append('\\n'.join(lines))
+    await callback.message.answer('\\n\\n'.join(chunks))
