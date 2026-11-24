@@ -1,4 +1,6 @@
-import asyncio, json, logging, time
+import asyncio
+import logging
+import time
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, PollAnswer
 from config import load_config
@@ -6,7 +8,7 @@ from database.db import save_poll, save_vote, get_expired_polls, finalize_poll, 
 
 router = Router()
 log = logging.getLogger(__name__)
-# Short-lived creation steps; persisted polls/votes survive bot restarts.
+# Drafts are temporary; published polls and votes are stored in SQLite.
 drafts: dict[int, dict] = {}
 
 def owner(user_id: int) -> bool:
@@ -15,44 +17,63 @@ def owner(user_id: int) -> bool:
 @router.callback_query(F.data == 'poll:create')
 async def create_poll_begin(callback: CallbackQuery):
     if not owner(callback.from_user.id):
-        await callback.answer('Нет доступа', show_alert=True); return
-    drafts[callback.from_user.id] = {'step':'question'}
+        await callback.answer('Нет доступа', show_alert=True)
+        return
+    drafts[callback.from_user.id] = {'step': 'question'}
     await callback.answer()
-    if callback.message: await callback.message.answer('✏️ Напиши вопрос для голосования:')
+    if callback.message:
+        await callback.message.answer('✏️ Напиши вопрос для голосования:')
 
 @router.message(F.text)
 async def poll_creation_step(message: Message):
     user = message.from_user
-    if not user or not owner(user.id) or user.id not in drafts: return
+    if not user or not owner(user.id) or user.id not in drafts:
+        return
     draft = drafts[user.id]
     text = (message.text or '').strip()
     if draft['step'] == 'question':
-        if len(text) > 300: await message.answer('Вопрос слишком длинный (максимум 300 символов).'); return
-        draft['question'] = text; draft['step'] = 'options'
-        await message.answer('Теперь отправь варианты ответа, каждый с новой строки (от 2 до 12):')
+        if not text or len(text) > 300:
+            await message.answer('Вопрос должен быть не пустым и не длиннее 300 символов.')
+            return
+        draft['question'] = text
+        draft['step'] = 'options'
+        await message.answer('Отправь варианты ответа, каждый с новой строки (от 2 до 12):')
     elif draft['step'] == 'options':
         options = [line.strip() for line in text.splitlines() if line.strip()]
         if not 2 <= len(options) <= 12 or len(set(options)) != len(options):
-            await message.answer('Нужно 2–12 уникальных вариантов, каждый на отдельной строке. Попробуй ещё раз.'); return
-        if any(len(o)>100 for o in options):
-            await message.answer('Каждый вариант должен быть до 100 символов. Попробуй снова.'); return
-        draft['options'] = options; draft['step'] = 'chat'
-        await message.answer('Укажи ID чата или группы, куда отправить опрос (например, -1001234567890). Бот должен быть добавлен в этот чат.')
+            await message.answer('Нужно 2–12 уникальных вариантов, каждый на отдельной строке. Попробуй ещё раз.')
+            return
+        if any(len(option) > 100 for option in options):
+            await message.answer('Каждый вариант должен быть не длиннее 100 символов.')
+            return
+        draft['options'] = options
+        draft['step'] = 'chat'
+        await message.answer('Укажи ID группы/чата, куда отправить опрос (например, -1001234567890). Бот должен быть добавлен туда.')
     elif draft['step'] == 'chat':
-        try: chat_id = int(text)
-        except ValueError: await message.answer('ID чата должен быть числом.'); return
-        options = draft['options']
-        close_at = int(time.time()) + 86400
         try:
-            sent = await message.bot.send_poll(chat_id=chat_id, question=draft['question'], options=options,
-                is_anonymous=False, allows_multiple_answers=False, allows_revoting=True,
-                close_date=close_at, protect_content=False)
-            await save_poll(sent.poll.id, sent.chat.id, sent.message_id, draft['question'], options,
-                            user.id, int(time.time()), close_at)
-            await message.answer('✅ Опрос опубликован!\n\n⏳ Закроется через 24 часа. После закрытия бот пришлёт итоги в чат голосования.')
-        except Exception as exc:
+            chat_id = int(text)
+        except ValueError:
+            await message.answer('ID чата должен быть числом.')
+            return
+        options = draft['options']
+        created_at = int(time.time())
+        close_at = created_at + 86400
+        try:
+            sent = await message.bot.send_poll(
+                chat_id=chat_id,
+                question=draft['question'],
+                options=options,
+                is_anonymous=False,
+                allows_multiple_answers=False,
+                allows_revoting=True,
+                close_date=close_at,
+            )
+            await save_poll(sent.poll.id, sent.chat.id, sent.message_id, draft['question'],
+                            options, user.id, created_at, close_at)
+            await message.answer('✅ Опрос опубликован! Он закроется через 24 часа, и бот отправит итоговый подсчёт в чат голосования.')
+        except Exception:
             log.exception('Poll creation failed')
-            await message.answer(f'Не получилось отправить опрос: {exc}')
+            await message.answer('Не удалось отправить опрос. Проверь ID чата и права бота.')
         finally:
             drafts.pop(user.id, None)
 
@@ -65,38 +86,44 @@ async def on_poll_answer(answer: PollAnswer):
 async def poll_closer(bot):
     while True:
         try:
-            for poll_id, chat_id, msg_id, question, options_json in await get_expired_polls(int(time.time())):
+            expired = await get_expired_polls(int(time.time()))
+            for poll_id, chat_id, message_id, question, _options_json in expired:
                 try:
-                    await bot.stop_poll(chat_id=chat_id, message_id=msg_id)
+                    await bot.stop_poll(chat_id=chat_id, message_id=message_id)
                 except Exception as exc:
-                    log.info('stop_poll possibly already closed: %s', exc)
-                result = await finalize_poll(poll_id)
-                total = sum(n for _,n in result)
-                lines = [f'🗳 <b>Голосование завершено!</b>', f'<b>{question}</b>', '']
-                for option, count in result:
-                    lines.append(f'{option}: <b>{count}</b>')
+                    log.info('Poll may already be closed: %s', exc)
+                results = await finalize_poll(poll_id)
+                total = sum(count for _, count in results)
+                lines = ['🗳 <b>Голосование завершено!</b>', f'<b>{question}</b>', '']
+                lines.extend([f'{option}: <b>{count}</b>' for option, count in results])
                 lines.extend(['', f'Всего голосов: <b>{total}</b>', 'Итоги сохранены в истории.'])
-                try: await bot.send_message(chat_id, '\n'.join(lines))
-                except Exception: log.exception('Could not send poll results')
-        except Exception: log.exception('Poll closer loop failed')
+                try:
+                    await bot.send_message(chat_id, '\\n'.join(lines))
+                except Exception:
+                    log.exception('Could not send poll results')
+        except Exception:
+            log.exception('Poll closer loop error')
         await asyncio.sleep(20)
 
 @router.callback_query(F.data == 'poll:history')
 async def show_poll_history(callback: CallbackQuery):
     if not owner(callback.from_user.id):
-        await callback.answer('Нет доступа', show_alert=True); return
+        await callback.answer('Нет доступа', show_alert=True)
+        return
     await callback.answer()
-    if not callback.message: return
+    if not callback.message:
+        return
     records = await get_poll_history()
     if not records:
         await callback.message.answer('📚 История голосований пока пуста.')
         return
-    chunks = ['📚 <b>Последние голосования</b>']
-    for question, options, counts, created, status in records:
+    parts = ['📚 <b>Последние голосования</b>']
+    for question, options, counts, _created, status in records:
         if counts is None:
-            lines = [f'• <b>{question}</b> — в процессе']
+            parts.append(f'• <b>{question}</b> — ещё идёт')
         else:
-            total = sum(counts)
-            lines = [f'• <b>{question}</b>', *(f'{opt}: {cnt}' for opt,cnt in zip(options,counts)), f'Всего: {total}']
-        chunks.append('\\n'.join(lines))
-    await callback.message.answer('\\n\\n'.join(chunks))
+            lines = [f'• <b>{question}</b>']
+            lines.extend([f'{option}: {count}' for option, count in zip(options, counts)])
+            lines.append(f'Всего: {sum(counts)}')
+            parts.append('\\n'.join(lines))
+    await callback.message.answer('\\n\\n'.join(parts))
