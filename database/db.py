@@ -37,15 +37,18 @@ async def save_poll(poll_id: str, chat_id: int, message_id: int, question: str,
             (poll_id, chat_id, message_id, question, json.dumps(options, ensure_ascii=False), creator_id, created_at, close_at))
         await db.commit()
 
-async def save_vote(poll_id: str, user_id: int, option_id: int) -> bool:
+async def save_vote(poll_id: str, user_id: int, option_id: int | None) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute('SELECT close_at,status FROM polls WHERE telegram_poll_id=?', (poll_id,))
         row = await cur.fetchone()
         import time
         if not row or row[1] != 'active' or row[0] <= int(time.time()):
             return False
-        await db.execute('INSERT INTO poll_votes (poll_id,user_id,option_id) VALUES (?,?,?) ON CONFLICT(poll_id,user_id) DO UPDATE SET option_id=excluded.option_id,updated_at=strftime("%s","now")',
-            (poll_id,user_id,option_id))
+        if option_id is None:
+            await db.execute('DELETE FROM poll_votes WHERE poll_id=? AND user_id=?', (poll_id,user_id))
+        else:
+            await db.execute('INSERT INTO poll_votes (poll_id,user_id,option_id) VALUES (?,?,?) ON CONFLICT(poll_id,user_id) DO UPDATE SET option_id=excluded.option_id,updated_at=strftime("%s","now")',
+                (poll_id,user_id,option_id))
         await db.commit()
         return True
 
@@ -69,3 +72,10 @@ async def finalize_poll(poll_id: str):
             (json.dumps(counts),poll_id))
         await db.commit()
         return list(zip(options,counts))
+
+async def get_poll_history(limit: int = 10):
+    import json
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute('SELECT question,options_json,final_counts_json,created_at,status FROM polls ORDER BY created_at DESC LIMIT ?', (limit,))
+        rows = await cur.fetchall()
+        return [(q, json.loads(opts), json.loads(counts) if counts else None, created, status) for q,opts,counts,created,status in rows]
