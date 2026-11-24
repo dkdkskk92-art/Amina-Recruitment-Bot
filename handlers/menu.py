@@ -17,6 +17,7 @@ async def voting_menu(callback: CallbackQuery):
         return
     kb = InlineKeyboardBuilder()
     kb.button(text='➕ Создать голосование', callback_data='poll:create')
+    kb.button(text='📚 История', callback_data='poll:history')
     kb.button(text='↩️ Главное меню', callback_data='poll:menu')
     kb.adjust(1)
     await callback.message.answer('🗳 <b>Голосования</b>\n\nСоздай нативный Telegram-опрос. Он закроется автоматически через 24 часа, после чего бот опубликует подсчёт.', reply_markup=kb.as_markup())
