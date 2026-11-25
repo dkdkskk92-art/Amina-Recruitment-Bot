@@ -251,18 +251,22 @@ async def expiry_worker(bot: Bot):
             for row in warnings + mutes + bans:
                 row.active = False
             await session.commit()
-        for user_id, chat_id in mute_targets + ban_targets:
+        for user_id, chat_id in mute_targets:
             async with Session() as session:
                 user = await session.get(User, user_id)
-            if not user:
-                continue
-            try:
-                if (user_id, chat_id) in mute_targets:
+            if user:
+                try:
                     await clear_mute(bot, chat_id, user.telegram_id)
-                else:
+                except Exception:
+                    logging.exception("Не удалось снять истёкший мут")
+        for user_id, chat_id in ban_targets:
+            async with Session() as session:
+                user = await session.get(User, user_id)
+            if user:
+                try:
                     await bot.unban_chat_member(chat_id, user.telegram_id, only_if_banned=True)
-            except Exception:
-                logging.exception("Не удалось снять истёкшее наказание")
+                except Exception:
+                    logging.exception("Не удалось снять истёкший бан")
         await asyncio.sleep(20)
 
 async def main():
