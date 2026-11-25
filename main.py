@@ -589,7 +589,7 @@ async def main():
     async def chat_id_handler(message: Message):
         await message.reply(f"ID этого чата равен <code>{message.chat.id}</code>", parse_mode="HTML")
 
-    @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) & F.text.regexp(r"(?i)^\\+репорты из чата\s+-100\\d+\s*$"))
+    @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) & F.text.regexp(r"(?i)^\+репорты из чата\s+-100\d+\s*$"))
     async def set_report_route_handler(message: Message):
         parts = message.text.split()
         source_id = int(parts[-1])
