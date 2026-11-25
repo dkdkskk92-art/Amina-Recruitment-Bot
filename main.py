@@ -678,6 +678,9 @@ async def main():
             await query.answer("Некорректная кнопка.", show_alert=True)
             return
         required = {"mute": 2, "ban": 3, "warn": 1}.get(action)
+        if required is None:
+            await query.answer("Неизвестное действие.", show_alert=True)
+            return
         async with Session() as session:
             actor = await get_user(session, query.from_user.id)
             report = await session.get(Report, report_id)
