@@ -12,7 +12,7 @@ from aiogram.utils.text_decorations import html_decoration
 from sqlalchemy import select, func, text
 
 from config import settings
-from database import Base, engine, Session, User, Chat, Warning, Mute, Ban, PunishmentLog, Note
+from database import Base, engine, Session, User, Chat, Warning, Mute, Ban, PunishmentLog, Note, ReportRoute, Report
 
 RANKS = {0:"Участник", 1:"Модератор I", 2:"Модератор II", 3:"Старший модератор", 4:"Главный модератор", 5:"Владелец"}
 DURATION_RE = re.compile(r"(?i)(навсегда|\d+\s*(?:секунд(?:у|ы)?|сек|минут(?:у|ы)?|мин|час(?:а|ов)?|дн(?:я|ей)?|день))")
@@ -400,6 +400,122 @@ async def expiry_worker(bot: Bot):
                     logging.exception("Не удалось снять истёкший бан")
         await asyncio.sleep(20)
 
+
+
+async def apply_report_punishment(query: CallbackQuery, report_id: int, action: str, duration_code: str):
+    duration_map = {
+        "m10": timedelta(minutes=10), "h1": timedelta(hours=1),
+        "d1": timedelta(days=1), "d7": timedelta(days=7)
+    }
+    if action not in {"mute", "ban", "warn"} or (duration_code != "forever" and duration_code not in duration_map):
+        await query.answer("Некорректный срок.", show_alert=True)
+        return
+    required = {"mute": 2, "ban": 3, "warn": 1}[action]
+    async with Session() as session:
+        actor = await get_user(session, query.from_user.id)
+        report = await session.get(Report, report_id)
+        if not report or report.status != "pending":
+            await query.answer("Этот репорт уже обрабатывается или обработан.", show_alert=True)
+            return
+        target = await session.get(User, report.target_user_id) if report.target_user_id else None
+        if not actor or actor.rank < required or not target or actor.id == target.id or actor.rank <= target.rank:
+            await query.answer("Недостаточно прав или цель имеет равный/старший ранг.", show_alert=True)
+            return
+        report.status = "processing"
+        report.handled_by = actor.id
+        await session.commit()
+        source_chat_id = report.source_chat_id
+        target_tg_id, target_custom_id = target.telegram_id, target.id
+    expiry = None if duration_code == "forever" else datetime.now(timezone.utc) + duration_map[duration_code]
+    try:
+        if action == "mute":
+            await query.bot.restrict_chat_member(source_chat_id, target_tg_id,
+                permissions=ChatPermissions(can_send_messages=False),
+                until_date=int(expiry.timestamp()) if expiry else None)
+        elif action == "ban":
+            await query.bot.ban_chat_member(source_chat_id, target_tg_id,
+                until_date=int(expiry.timestamp()) if expiry else None)
+        else:
+            async with Session() as session:
+                session.add(Warning(user_id=target_custom_id, chat_id=source_chat_id,
+                                    moderator_id=actor.id, expires_at=expiry))
+                session.add(PunishmentLog(user_id=target_custom_id, moderator_id=actor.id,
+                    chat_id=source_chat_id, action="варн по репорту", details="7 дней"))
+                await session.commit()
+        if action in {"mute", "ban"}:
+            async with Session() as session:
+                if action == "mute":
+                    session.add(Mute(user_id=target_custom_id, chat_id=source_chat_id,
+                                     moderator_id=actor.id, expires_at=expiry))
+                else:
+                    session.add(Ban(user_id=target_custom_id, chat_id=source_chat_id,
+                                    moderator_id=actor.id, expires_at=expiry))
+                session.add(PunishmentLog(user_id=target_custom_id, moderator_id=actor.id,
+                    chat_id=source_chat_id, action=action + " по репорту",
+                    details=duration_code))
+                await session.commit()
+        async with Session() as session:
+            report = await session.get(Report, report_id)
+            report.status, report.handled_at = "handled", datetime.now(timezone.utc)
+            await session.commit()
+        await render_report(query.bot, report_id)
+        await query.answer("Наказание применено в исходной группе.")
+    except Exception:
+        logging.exception("Ошибка применения наказания по репорту %s", report_id)
+        async with Session() as session:
+            report = await session.get(Report, report_id)
+            if report and report.status == "processing":
+                report.status, report.handled_by = "pending", None
+                await session.commit()
+        await query.answer("Не удалось применить наказание. Проверь права бота в исходной группе.", show_alert=True)
+
+
+def report_action_markup(report_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔇 Мут", callback_data=f"ract:{report_id}:mute"),
+         InlineKeyboardButton(text="🚫 Бан", callback_data=f"ract:{report_id}:ban")],
+        [InlineKeyboardButton(text="⚠️ Варн 7 дней", callback_data=f"ract:{report_id}:warn"),
+         InlineKeyboardButton(text="Отклонить", callback_data=f"rreject:{report_id}")]
+    ])
+
+
+def report_duration_markup(report_id: int, action: str):
+    choices = [("10 минут", "m10"), ("1 час", "h1"), ("1 день", "d1"), ("7 дней", "d7")]
+    if action == "ban":
+        choices.append(("Навсегда", "forever"))
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=label, callback_data=f"rdo:{report_id}:{action}:{code}")]
+        for label, code in choices
+    ])
+
+
+async def render_report(bot: Bot, report_id: int):
+    async with Session() as session:
+        report = await session.get(Report, report_id)
+        if not report:
+            return
+        author = await session.get(User, report.author_id)
+        target = await session.get(User, report.target_user_id) if report.target_user_id else None
+        source = await session.scalar(select(Chat).where(Chat.telegram_chat_id == report.source_chat_id))
+        values = (report.destination_chat_id, report.destination_message_id, report.status,
+                  author.first_name if author else "Неизвестно", author.id if author else 0,
+                  target.first_name if target else "не указан", target.id if target else None,
+                  report.text, source.title if source else str(report.source_chat_id))
+    dest_id, msg_id, status, author_name, author_custom_id, target_name, target_custom_id, body, source_title = values
+    status_text = {"pending": "🕓 Ожидает рассмотрения", "processing": "⏳ Выполняется", "handled": "✅ Обработана", "rejected": "❌ Отклонена"}.get(status, status)
+    safe = html_decoration.quote
+    target_line = f"\n<b>На кого жалоба:</b> {safe(target_name)} · ID <code>{target_custom_id}</code>" if target_custom_id else "\n<b>На кого жалоба:</b> не указан (репорт отправлен без ответа на сообщение)"
+    text_body = (f"🚨 <b>Новая жалоба №{report_id}</b>\n"
+                 f"<b>Чат:</b> {safe(source_title)}\n"
+                 f"<b>Автор:</b> {safe(author_name)} · кастомный ID <code>{author_custom_id}</code>"
+                 f"{target_line}\n<b>Текст:</b>\n{safe(body)}\n\n<b>Статус:</b> {status_text}")
+    markup = report_action_markup(report_id) if status == "pending" and target_custom_id else None
+    try:
+        await bot.edit_message_text(text_body, chat_id=dest_id, message_id=msg_id,
+                                    parse_mode="HTML", reply_markup=markup)
+    except Exception:
+        logging.exception("Не удалось обновить карточку репорта %s", report_id)
+
 async def main():
     logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
     async with engine.begin() as conn:
@@ -454,6 +570,11 @@ async def main():
             "Муты и снятие мутов — со 2 ранга.<br>Баны — с 3 ранга.<br>"
             "Разбан, управление рангами и заметками — с 4 ранга.<br>"
             "Повышать и понижать можно только пользователей ниже себя.</p></details>"
+            "<details><summary>📨 Репорты</summary>"
+            "<p><code>ид чата</code> — показать ID группы.<br>"
+            "В чате администрации: <code>+репорты из чата -100...</code> — подключить источник.<br>"
+            "Любой участник может отправить <code>репорт</code> с текстом, ответив на сообщение нарушителя. " 
+            "Один активный репорт на пользователя до решения администрации.</p></details>"
             "<details><summary>⚠️ Защита чата</summary>"
             "<p>Айзен удаляет распознаваемые ссылки Telegram и WhatsApp и пытается заблокировать отправителя. "
             "Для модерации и защиты чата боту нужны соответствующие права администратора.</p></details>"
@@ -462,6 +583,149 @@ async def main():
             chat_id=message.chat.id,
             rich_message=InputRichMessage(html=help_html)
         )
+
+
+    @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) & F.text.regexp(r"(?i)^ид чата\\s*$"))
+    async def chat_id_handler(message: Message):
+        await message.reply(f"ID этого чата равен <code>{message.chat.id}</code>", parse_mode="HTML")
+
+    @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) & F.text.regexp(r"(?i)^\\+репорты из чата\\s+-100\\d+\\s*$"))
+    async def set_report_route_handler(message: Message):
+        parts = message.text.split()
+        source_id = int(parts[-1])
+        async with Session() as session:
+            actor = await get_user(session, message.from_user.id)
+            if not actor or actor.rank < 4:
+                await message.reply("⛔ Настраивать маршруты репортов могут только ранги 4–5.")
+                return
+            if source_id == message.chat.id:
+                await message.reply("Нельзя направить репорты чата в него же.")
+                return
+            source = await session.scalar(select(Chat).where(Chat.telegram_chat_id == source_id))
+            if not source:
+                await message.reply("Этот чат ещё не зарегистрирован. Добавьте бота в исходную группу и выполните там «ид чата».")
+                return
+            route = await session.scalar(select(ReportRoute).where(ReportRoute.source_chat_id == source_id))
+            if route:
+                route.destination_chat_id = message.chat.id
+                route.created_by = actor.id
+            else:
+                session.add(ReportRoute(source_chat_id=source_id, destination_chat_id=message.chat.id, created_by=actor.id))
+            await session.commit()
+            source_title = source.title or str(source_id)
+        await message.reply(f"✅ Репорты из чата «{html_decoration.quote(source_title)}» будут приходить сюда.", parse_mode="HTML")
+
+    @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) & F.text.regexp(r"(?is)^репорт(?:\\s|$)"))
+    async def report_handler(message: Message):
+        if not message.from_user or message.from_user.is_bot:
+            return
+        body = message.text.split("\\n", 1)[1].strip() if "\\n" in message.text else ""
+        if not body:
+            await message.reply("Напиши репорт в формате:\\nрепорт\\nТекст жалобы")
+            return
+        async with Session() as session:
+            author = await get_user(session, message.from_user.id)
+            route = await session.scalar(select(ReportRoute).where(ReportRoute.source_chat_id == message.chat.id))
+            if not route:
+                await message.reply("Для этого чата ещё не настроен приём репортов.")
+                return
+            existing = await session.scalar(select(Report).where(
+                Report.source_chat_id == message.chat.id,
+                Report.author_id == author.id,
+                Report.status.in_([ "pending", "processing" ])
+            ))
+            if existing:
+                await message.reply("У тебя уже есть репорт, который ожидает рассмотрения. Повторный можно отправить после решения администрации.")
+                return
+            target = await get_user(session, message.reply_to_message.from_user.id) if message.reply_to_message and message.reply_to_message.from_user else None
+            report = Report(source_chat_id=message.chat.id, destination_chat_id=route.destination_chat_id,
+                            author_id=author.id, target_user_id=target.id if target else None, text=body)
+            session.add(report)
+            await session.commit()
+            await session.refresh(report)
+            report_id, destination_id = report.id, route.destination_chat_id
+            author_name, author_custom_id = author.first_name or "Без имени", author.id
+            target_name, target_custom_id = (target.first_name or "Без имени", target.id) if target else (None, None)
+            source_title = message.chat.title or str(message.chat.id)
+        safe = html_decoration.quote
+        target_line = f"\\n<b>На кого жалоба:</b> {safe(target_name)} · кастомный ID <code>{target_custom_id}</code>" if target_custom_id else "\\n<b>На кого жалоба:</b> не указан — для кнопок наказания нужно отправить репорт ответом на сообщение пользователя"
+        card = (f"🚨 <b>Новая жалоба №{report_id}</b>\\n<b>Чат:</b> {safe(source_title)}\\n"
+                f"<b>Автор:</b> {safe(author_name)} · кастомный ID <code>{author_custom_id}</code>"
+                f"{target_line}\\n<b>Текст:</b>\\n{safe(body)}\\n\\n<b>Статус:</b> 🕓 Ожидает рассмотрения")
+        try:
+            sent = await message.bot.send_message(destination_id, card, parse_mode="HTML",
+                                                  reply_markup=report_action_markup(report_id) if target else None)
+            async with Session() as session:
+                saved = await session.get(Report, report_id)
+                saved.destination_message_id = sent.message_id
+                await session.commit()
+            await message.reply("Ваша жалоба отправлена администрации! Спасибо.")
+        except Exception:
+            logging.exception("Не удалось доставить репорт %s", report_id)
+            async with Session() as session:
+                saved = await session.get(Report, report_id)
+                if saved and saved.status == "pending":
+                    await session.delete(saved)
+                    await session.commit()
+            await message.reply("Не удалось отправить жалобу. Сообщи администрации чата.")
+
+    @dp.callback_query(F.data.startswith("ract:"))
+    async def report_action_choose(query: CallbackQuery):
+        try:
+            _, raw_id, action = query.data.split(":")
+            report_id = int(raw_id)
+        except (ValueError, AttributeError):
+            await query.answer("Некорректная кнопка.", show_alert=True)
+            return
+        required = {"mute": 2, "ban": 3, "warn": 1}.get(action)
+        async with Session() as session:
+            actor = await get_user(session, query.from_user.id)
+            report = await session.get(Report, report_id)
+            if not report or report.status != "pending":
+                await query.answer("Этот репорт уже обработан.", show_alert=True)
+                return
+            target = await session.get(User, report.target_user_id) if report.target_user_id else None
+            if not actor or actor.rank < required or not target or actor.id == target.id or actor.rank <= target.rank:
+                await query.answer("Недостаточно прав или цель имеет равный/старший ранг.", show_alert=True)
+                return
+        if action == "warn":
+            await apply_report_punishment(query, report_id, action, "d7")
+        else:
+            await query.message.edit_reply_markup(reply_markup=report_duration_markup(report_id, action))
+            await query.answer("Выбери срок наказания.")
+
+    @dp.callback_query(F.data.startswith("rdo:"))
+    async def report_action_execute(query: CallbackQuery):
+        try:
+            _, raw_id, action, duration = query.data.split(":")
+            report_id = int(raw_id)
+        except (ValueError, AttributeError):
+            await query.answer("Некорректная кнопка.", show_alert=True)
+            return
+        await apply_report_punishment(query, report_id, action, duration)
+
+    @dp.callback_query(F.data.startswith("rreject:"))
+    async def report_reject(query: CallbackQuery):
+        try:
+            report_id = int(query.data.split(":")[1])
+        except (ValueError, AttributeError):
+            await query.answer("Некорректная кнопка.", show_alert=True)
+            return
+        async with Session() as session:
+            actor = await get_user(session, query.from_user.id)
+            report = await session.get(Report, report_id)
+            if not actor or actor.rank < 1:
+                await query.answer("Отклонять репорты могут модераторы от 1 ранга.", show_alert=True)
+                return
+            if not report or report.status != "pending":
+                await query.answer("Этот репорт уже обработан.", show_alert=True)
+                return
+            report.status, report.handled_by, report.handled_at = "rejected", actor.id, datetime.now(timezone.utc)
+            await session.commit()
+        await render_report(query.bot, report_id)
+        await query.answer("Репорт отклонён.")
+
+
 
     @dp.message(F.text.regexp(r"(?i)^профиль(?:\s+\d+)?\s*$"))
     async def profile_handler(message: Message):
