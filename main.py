@@ -210,6 +210,38 @@ async def show_note(message: Message):
     await message.answer(f"📝 <b>Заметка №{note_id}: {title}</b>", parse_mode="HTML")
     await message.answer(body, entities=entities or None)
 
+async def list_notes(message: Message):
+    async with Session() as session:
+        actor = await get_user(session, message.from_user.id)
+        if not actor or actor.rank < 4:
+            await message.reply("⛔ Заметки доступны только с 4 ранга.")
+            return
+        notes = (await session.scalars(select(Note).order_by(Note.id.asc()))).all()
+        note_data = [
+            (note.id, note.title, note.body,
+             json.loads(note.entities_json) if note.entities_json else [])
+            for note in notes
+        ]
+
+    if not note_data:
+        await message.reply("🗒 Список заметок пока пуст.")
+        return
+
+    await message.answer(f"🗒 <b>Все заметки</b> · {len(note_data)}", parse_mode="HTML")
+    for note_id, title, body, raw_entities in note_data:
+        header = f"📝 Заметка №{note_id}: {title}\n\n"
+        body_offset = utf16_length(header)
+        entities = [
+            MessageEntity(type="expandable_blockquote", offset=body_offset,
+                          length=utf16_length(body))
+        ]
+        for item in raw_entities:
+            entity = MessageEntity.model_validate(item)
+            entity.offset += body_offset
+            entities.append(entity)
+        await message.answer(header + body, entities=entities)
+
+
 async def moderation_action(message: Message, action: str, required_rank: int):
     raw = message.text.split(maxsplit=1)[1] if len(message.text.split(maxsplit=1)) > 1 else ""
     duration_text, target_text = parse_target_parts(raw)
@@ -392,6 +424,7 @@ async def main():
             "📝 <b>Заметки (ранги 4–5)</b>\n"
             "• <code>+заметка Название</code>, а на следующей строке — текст заметки. "
             "Название — до 20 символов. Форматирование текста сохраняется.\n"
+            "• <code>заметки</code> — показать все заметки со сворачиваемым текстом.\n"
             "• <code>заметка 12</code> — открыть заметку №12.\n"
             "• <code>-заметка 12</code> — удалить заметку №12.\n\n"
             "⏱ <b>Сроки наказаний</b>\n"
@@ -448,6 +481,10 @@ async def main():
     @dp.message(F.text.regexp(r"(?i)^заметка\s+\d+\s*$"))
     async def show_note_handler(message: Message):
         await show_note(message)
+
+    @dp.message(F.text.regexp(r"(?i)^заметки\s*$"))
+    async def list_notes_handler(message: Message):
+        await list_notes(message)
 
     @dp.message(F.text.regexp(r"(?i)^-смс\s*$"))
     async def delete_handler(message: Message):
