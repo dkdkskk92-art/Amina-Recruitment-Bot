@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -6,11 +7,11 @@ from datetime import datetime, timedelta, timezone
 from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.enums import ChatType
 from aiogram.filters import CommandStart
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions
-from sqlalchemy import select, func
+from aiogram.types import Message, MessageEntity, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions
+from sqlalchemy import select, func, text
 
 from config import settings
-from database import Base, engine, Session, User, Chat, Warning, Mute, Ban, PunishmentLog
+from database import Base, engine, Session, User, Chat, Warning, Mute, Ban, PunishmentLog, Note
 
 RANKS = {0:"Участник", 1:"Модератор I", 2:"Модератор II", 3:"Старший модератор", 4:"Главный модератор", 5:"Владелец"}
 DURATION_RE = re.compile(r"(?i)(навсегда|\d+\s*(?:секунд(?:у|ы)?|сек|минут(?:у|ы)?|мин|час(?:а|ов)?|дн(?:я|ей)?|день))")
@@ -119,12 +120,95 @@ async def profile(message: Message):
         name = " ".join(x for x in (user.first_name, user.last_name) if x) or "Без имени"
         username = f"\nUsername: @{user.username}" if user.username else ""
         registered = user.registered_at.strftime("%d.%m.%Y") if user.registered_at else "неизвестно"
-        await message.reply(
+        avatar_file_id, avatar_type = user.avatar_file_id, user.avatar_type
+        caption = (
             f"👤 <b>Профиль</b>\nИмя: {name}{username}\nКастомный ID: <code>{user.id}</code>"
             f"\nРанг: {RANKS.get(user.rank, 'Участник')} ({user.rank})"
             f"\nАктивные варны: {warns}\nАктивные муты: {mutes}\nАктивные баны: {bans}"
-            f"\nРегистрация: {registered}", parse_mode="HTML"
+            f"\nРегистрация: {registered}"
         )
+    if avatar_file_id and avatar_type == "photo":
+        await message.answer_photo(avatar_file_id, caption=caption, parse_mode="HTML")
+    elif avatar_file_id and avatar_type == "video":
+        await message.answer_video(avatar_file_id, caption=caption, parse_mode="HTML")
+    else:
+        await message.answer(caption, parse_mode="HTML")
+
+def utf16_length(value: str) -> int:
+    return len(value.encode("utf-16-le")) // 2
+
+async def save_note(message: Message):
+    if not message.text or "\n" not in message.text:
+        await message.reply("Формат: +заметка Название (до 20 символов), затем текст заметки с новой строки.")
+        return
+    header, body = message.text.split("\n", 1)
+    title = header[len("+заметка"):].strip()
+    if not title or len(title) > 20:
+        await message.reply("Название должно содержать от 1 до 20 символов.")
+        return
+    if not body.strip():
+        await message.reply("Добавь текст заметки на следующей строке.")
+        return
+    body_offset = utf16_length(header + "\n")
+    total_length = utf16_length(message.text)
+    entities = []
+    for entity in message.entities or []:
+        if entity.offset >= body_offset and entity.offset + entity.length <= total_length:
+            entities.append(entity.model_dump(mode="json", exclude_none=True) | {
+                "offset": entity.offset - body_offset
+            })
+    async with Session() as session:
+        actor = await get_user(session, message.from_user.id)
+        if not actor or actor.rank < 4:
+            await message.reply("⛔ Заметки доступны только с 4 ранга.")
+            return
+        note = Note(title=title, body=body,
+                    entities_json=json.dumps(entities, ensure_ascii=False) if entities else None,
+                    created_by=actor.id)
+        session.add(note)
+        await session.commit()
+        await session.refresh(note)
+        note_id = note.id
+    await message.reply(f"📝 Заметка «{title}» сохранена. Номер: <code>{note_id}</code>", parse_mode="HTML")
+
+async def delete_note(message: Message):
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip().isdigit():
+        await message.reply("Укажи номер: -заметка 12")
+        return
+    note_id = int(parts[1].strip())
+    async with Session() as session:
+        actor = await get_user(session, message.from_user.id)
+        if not actor or actor.rank < 4:
+            await message.reply("⛔ Заметки доступны только с 4 ранга.")
+            return
+        note = await session.get(Note, note_id)
+        if not note:
+            await message.reply("Заметка с таким номером не найдена.")
+            return
+        title = note.title
+        await session.delete(note)
+        await session.commit()
+    await message.reply(f"🗑 Заметка №{note_id} «{title}» удалена.")
+
+async def show_note(message: Message):
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip().isdigit():
+        return
+    async with Session() as session:
+        actor = await get_user(session, message.from_user.id)
+        if not actor or actor.rank < 4:
+            await message.reply("⛔ Заметки доступны только с 4 ранга.")
+            return
+        note = await session.get(Note, int(parts[1].strip()))
+        if not note:
+            await message.reply("Заметка с таким номером не найдена.")
+            return
+        note_id, title, body = note.id, note.title, note.body
+        raw_entities = json.loads(note.entities_json) if note.entities_json else []
+    entities = [MessageEntity.model_validate(item) for item in raw_entities]
+    await message.answer(f"📝 <b>Заметка №{note_id}: {title}</b>", parse_mode="HTML")
+    await message.answer(body, entities=entities or None)
 
 async def moderation_action(message: Message, action: str, required_rank: int):
     raw = message.text.split(maxsplit=1)[1] if len(message.text.split(maxsplit=1)) > 1 else ""
@@ -273,6 +357,8 @@ async def main():
     logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_file_id VARCHAR(255)"))
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_type VARCHAR(10)"))
     bot = Bot(settings.bot_token)
     dp = Dispatcher()
     dp.message.outer_middleware(RegistrationMiddleware())
@@ -284,6 +370,34 @@ async def main():
     @dp.message(F.text.regexp(r"(?i)^профиль(?:\s+\d+)?\s*$"))
     async def profile_handler(message: Message):
         await profile(message)
+
+    @dp.message((F.photo | F.video) & F.caption.regexp(r"(?i)^аватар$"))
+    async def avatar_handler(message: Message):
+        async with Session() as session:
+            user = await get_user(session, message.from_user.id)
+            if not user:
+                await message.reply("Сначала напиши «профиль».")
+                return
+            if message.photo:
+                user.avatar_file_id = message.photo[-1].file_id
+                user.avatar_type = "photo"
+            else:
+                user.avatar_file_id = message.video.file_id
+                user.avatar_type = "video"
+            await session.commit()
+        await message.reply("✅ Аватарка сохранена. Теперь она будет отображаться в твоём профиле.")
+
+    @dp.message(F.text.regexp(r"(?is)^\+заметка(?:\s|$)"))
+    async def add_note_handler(message: Message):
+        await save_note(message)
+
+    @dp.message(F.text.regexp(r"(?i)^-заметка(?:\s|$)"))
+    async def remove_note_handler(message: Message):
+        await delete_note(message)
+
+    @dp.message(F.text.regexp(r"(?i)^заметка\s+\d+\s*$"))
+    async def show_note_handler(message: Message):
+        await show_note(message)
 
     @dp.message(F.text.regexp(r"(?i)^-смс\s*$"))
     async def delete_handler(message: Message):
