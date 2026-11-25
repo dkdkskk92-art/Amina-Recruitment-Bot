@@ -109,9 +109,15 @@ async def rank_for(session, telegram_id):
     return user.rank if user else 0
 
 async def profile(message: Message):
-    parts = message.text.split()
+    parts = (message.text or "").split()
     async with Session() as session:
-        user = await session.get(User, int(parts[1])) if len(parts) > 1 and parts[1].isdigit() else await get_user(session, message.from_user.id)
+        # Приоритет: ответ на сообщение пользователя, затем кастомный ID, иначе свой профиль.
+        if message.reply_to_message and message.reply_to_message.from_user:
+            user = await get_user(session, message.reply_to_message.from_user.id)
+        elif len(parts) > 1 and parts[1].isdigit():
+            user = await session.get(User, int(parts[1]))
+        else:
+            user = await get_user(session, message.from_user.id)
         if not user:
             await message.reply("Пользователь не найден.")
             return
