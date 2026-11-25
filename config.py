@@ -1,20 +1,18 @@
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 from dotenv import load_dotenv
 
 load_dotenv()
 
 @dataclass(frozen=True)
-class Config:
-    bot_token: str
-    owner_id: int
+class Settings:
+    bot_token: str = os.getenv("BOT_TOKEN", "")
+    database_url: str = os.getenv("DATABASE_URL", "")
+    owner_telegram_id: int = int(os.getenv("OWNER_TELEGRAM_ID", "0"))
+    log_level: str = os.getenv("LOG_LEVEL", "INFO")
 
-def load_config() -> Config:
-    token = os.getenv('BOT_TOKEN', '').strip()
-    if not token:
-        raise RuntimeError('BOT_TOKEN is missing. Copy .env.example to .env and set it.')
-    try:
-        owner_id = int(os.getenv('OWNER_ID', '0'))
-    except ValueError as exc:
-        raise RuntimeError('OWNER_ID must be an integer.') from exc
-    return Config(bot_token=token, owner_id=owner_id)
+settings = Settings()
+if not settings.bot_token:
+    raise RuntimeError("Не задан BOT_TOKEN")
+if not settings.database_url:
+    raise RuntimeError("Не задан DATABASE_URL")

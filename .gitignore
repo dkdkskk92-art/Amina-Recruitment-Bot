@@ -1,11 +1,6 @@
 __pycache__/
 *.py[cod]
+.env
 .venv/
 venv/
-.env
-*.db
-*.sqlite3
-logs/
 .pytest_cache/
-.idea/
-.vscode/
