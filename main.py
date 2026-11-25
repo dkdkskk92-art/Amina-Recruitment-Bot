@@ -585,11 +585,11 @@ async def main():
         )
 
 
-    @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) & F.text.regexp(r"(?i)^ид чата\\s*$"))
+    @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) & F.text.regexp(r"(?i)^ид чата\s*$"))
     async def chat_id_handler(message: Message):
         await message.reply(f"ID этого чата равен <code>{message.chat.id}</code>", parse_mode="HTML")
 
-    @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) & F.text.regexp(r"(?i)^\\+репорты из чата\\s+-100\\d+\\s*$"))
+    @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) & F.text.regexp(r"(?i)^\\+репорты из чата\s+-100\\d+\s*$"))
     async def set_report_route_handler(message: Message):
         parts = message.text.split()
         source_id = int(parts[-1])
@@ -615,13 +615,13 @@ async def main():
             source_title = source.title or str(source_id)
         await message.reply(f"✅ Репорты из чата «{html_decoration.quote(source_title)}» будут приходить сюда.", parse_mode="HTML")
 
-    @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) & F.text.regexp(r"(?is)^репорт(?:\\s|$)"))
+    @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) & F.text.regexp(r"(?is)^репорт(?:\s|$)"))
     async def report_handler(message: Message):
         if not message.from_user or message.from_user.is_bot:
             return
-        body = message.text.split("\\n", 1)[1].strip() if "\\n" in message.text else ""
+        body = message.text.split("\n", 1)[1].strip() if "\n" in message.text else ""
         if not body:
-            await message.reply("Напиши репорт в формате:\\nрепорт\\nТекст жалобы")
+            await message.reply("Напиши репорт в формате:\nрепорт\nТекст жалобы")
             return
         async with Session() as session:
             author = await get_user(session, message.from_user.id)
@@ -648,10 +648,10 @@ async def main():
             target_name, target_custom_id = (target.first_name or "Без имени", target.id) if target else (None, None)
             source_title = message.chat.title or str(message.chat.id)
         safe = html_decoration.quote
-        target_line = f"\\n<b>На кого жалоба:</b> {safe(target_name)} · кастомный ID <code>{target_custom_id}</code>" if target_custom_id else "\\n<b>На кого жалоба:</b> не указан — для кнопок наказания нужно отправить репорт ответом на сообщение пользователя"
-        card = (f"🚨 <b>Новая жалоба №{report_id}</b>\\n<b>Чат:</b> {safe(source_title)}\\n"
+        target_line = f"\n<b>На кого жалоба:</b> {safe(target_name)} · кастомный ID <code>{target_custom_id}</code>" if target_custom_id else "\n<b>На кого жалоба:</b> не указан — для кнопок наказания нужно отправить репорт ответом на сообщение пользователя"
+        card = (f"🚨 <b>Новая жалоба №{report_id}</b>\n<b>Чат:</b> {safe(source_title)}\n"
                 f"<b>Автор:</b> {safe(author_name)} · кастомный ID <code>{author_custom_id}</code>"
-                f"{target_line}\\n<b>Текст:</b>\\n{safe(body)}\\n\\n<b>Статус:</b> 🕓 Ожидает рассмотрения")
+                f"{target_line}\n<b>Текст:</b>\n{safe(body)}\n\n<b>Статус:</b> 🕓 Ожидает рассмотрения")
         try:
             sent = await message.bot.send_message(destination_id, card, parse_mode="HTML",
                                                   reply_markup=report_action_markup(report_id) if target else None)
