@@ -25,6 +25,8 @@ class User(Base):
     last_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     rank: Mapped[int] = mapped_column(Integer, default=0, index=True)
     registered_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    avatar_file_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    avatar_type: Mapped[str | None] = mapped_column(String(10), nullable=True)
 
 class Chat(Base):
     __tablename__ = "chats"
@@ -76,3 +78,13 @@ class PunishmentLog(Base):
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+
+class Note(Base):
+    __tablename__ = "notes"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(20))
+    body: Mapped[str] = mapped_column(Text)
+    entities_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
