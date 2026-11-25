@@ -7,7 +7,8 @@ from datetime import datetime, timedelta, timezone
 from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.enums import ChatType
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, MessageEntity, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions
+from aiogram.types import Message, MessageEntity, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions, InputRichMessage
+from aiogram.utils.text_decorations import html_decoration
 from sqlalchemy import select, func, text
 
 from config import settings
@@ -219,7 +220,8 @@ async def list_notes(message: Message):
         notes = (await session.scalars(select(Note).order_by(Note.id.asc()))).all()
         note_data = [
             (note.id, note.title, note.body,
-             json.loads(note.entities_json) if note.entities_json else [])
+             [MessageEntity.model_validate(item) for item in json.loads(note.entities_json)]
+             if note.entities_json else [])
             for note in notes
         ]
 
@@ -227,19 +229,32 @@ async def list_notes(message: Message):
         await message.reply("🗒 Список заметок пока пуст.")
         return
 
-    await message.answer(f"🗒 <b>Все заметки</b> · {len(note_data)}", parse_mode="HTML")
-    for note_id, title, body, raw_entities in note_data:
-        header = f"📝 Заметка №{note_id}: {title}\n\n"
-        body_offset = utf16_length(header)
-        entities = [
-            MessageEntity(type="expandable_blockquote", offset=body_offset,
-                          length=utf16_length(body))
-        ]
-        for item in raw_entities:
-            entity = MessageEntity.model_validate(item)
-            entity.offset += body_offset
-            entities.append(entity)
-        await message.answer(header + body, entities=entities)
+    # Собираем несколько раскрывающихся заметок в одно компактное rich-сообщение.
+    chunks = []
+    current = []
+    current_size = 0
+    for note_id, title, body, entities in note_data:
+        formatted_body = html_decoration.unparse(body, entities).replace("\n", "<br>")
+        block = (
+            f"<details><summary>📝 №{note_id} — {html_decoration.quote(title)}</summary>"
+            f"<p>{formatted_body}</p></details>"
+        )
+        block_size = len(block)
+        if current and current_size + block_size > 3500:
+            chunks.append("".join(current))
+            current, current_size = [], 0
+        current.append(block)
+        current_size += block_size
+    if current:
+        chunks.append("".join(current))
+
+    total = len(note_data)
+    for index, chunk in enumerate(chunks, start=1):
+        heading = f"<h3>🗒 Заметки · {total}</h3>" if index == 1 else f"<p>🗒 Продолжение · {index}/{len(chunks)}</p>"
+        await message.bot.send_rich_message(
+            chat_id=message.chat.id,
+            rich_message=InputRichMessage(html=heading + chunk)
+        )
 
 
 async def moderation_action(message: Message, action: str, required_rank: int):
@@ -401,54 +416,52 @@ async def main():
 
     @dp.message(Command("help"))
     async def help_handler(message: Message):
-        help_text = (
-            "🤖 <b>Айзен | помощник — справка</b>\n"
-            "Я помогаю управлять чатом, следить за порядком и вести профили пользователей.\n\n"
-            "👤 <b>Профили</b>\n"
-            "• <code>профиль</code> — открыть свой профиль.\n"
-            "• <code>профиль 123</code> — открыть профиль по кастомному ID.\n"
-            "• Чтобы установить аватар, отправь фото или видео с подписью <code>аватар</code>.\n\n"
-            "🛡 <b>Модерация</b>\n"
-            "• <code>варн 1 день</code> — выдать предупреждение.\n"
-            "• <code>молчи 10 минут</code> — выдать мут.\n"
-            "• <code>бан навсегда</code> — заблокировать пользователя.\n"
-            "• <code>говори</code> — снять мут.\n"
-            "• <code>разбан</code> — снять бан.\n"
-            "• <code>снять варн</code> — снять последнее активное предупреждение.\n"
-            "• <code>-смс</code> — удалить сообщение, на которое ты ответил.\n\n"
-            "🎖 <b>Ранги</b>\n"
-            "• <code>повысить</code> — повысить ранг пользователя на один уровень.\n"
-            "• <code>понизить</code> — понизить ранг пользователя на один уровень.\n"
-            "Ранги: 0 — Участник, 1 — Модератор I, 2 — Модератор II, "
-            "3 — Старший модератор, 4 — Главный модератор, 5 — Владелец.\n\n"
-            "📝 <b>Заметки (ранги 4–5)</b>\n"
-            "• <code>+заметка Название</code>, а на следующей строке — текст заметки. "
-            "Название — до 20 символов. Форматирование текста сохраняется.\n"
-            "• <code>заметки</code> — показать все заметки со сворачиваемым текстом.\n"
-            "• <code>заметка 12</code> — открыть заметку №12.\n"
-            "• <code>-заметка 12</code> — удалить заметку №12.\n\n"
-            "⏱ <b>Сроки наказаний</b>\n"
-            "Можно указать секунды, минуты, часы, дни или <code>навсегда</code>: "
-            "<code>30 секунд</code>, <code>10 минут</code>, <code>2 часа</code>, <code>1 день</code>.\n"
-            "Третий активный варн автоматически выдаёт мут на 1 час. "
-            "Сроки наказаний отслеживаются автоматически.\n\n"
-            "📌 <b>Как указать пользователя</b>\n"
-            "Отправь команду ответом на сообщение пользователя или добавь его кастомный ID / "
-            "<code>@username</code> в конце команды. Например: <code>молчи 10 минут @username</code>.\n"
-            "Нельзя применять наказания к себе или пользователям с равным/более высоким рангом.\n\n"
-            "🔐 <b>Права</b>\n"
-            "• Удаление сообщений — с 1 ранга.\n"
-            "• Варны и снятие варнов — с 1 ранга.\n"
-            "• Муты и снятие мутов — со 2 ранга.\n"
-            "• Баны — с 3 ранга.\n"
-            "• Разбан, управление рангами и заметками — с 4 ранга.\n"
-            "Владелец имеет 5 ранг. Повышать и понижать можно только пользователей ниже себя.\n\n"
-            "⚠️ <b>Защита чата</b>\n"
-            "Айзен автоматически удаляет сообщения с распознаваемыми ссылками Telegram и WhatsApp "
-            "и пытается заблокировать отправителя. Для модерации и защиты чата боту нужны "
-            "соответствующие права администратора."
+        help_html = (
+            "<h2>🤖 Айзен | помощник</h2>"
+            "<p>Управление чатом, профилями и заметками. Нажми на раздел, чтобы раскрыть подробности.</p>"
+            "<details><summary>👤 Профили</summary>"
+            "<p><code>профиль</code> — свой профиль.<br>"
+            "<code>профиль 123</code> — профиль по кастомному ID.<br>"
+            "Чтобы установить аватар, отправь фото или видео с подписью <code>аватар</code>.</p></details>"
+            "<details><summary>🛡 Модерация</summary>"
+            "<p><code>варн 1 день</code> — предупреждение.<br>"
+            "<code>молчи 10 минут</code> — мут.<br>"
+            "<code>бан навсегда</code> — бан.<br>"
+            "<code>говори</code> — снять мут.<br>"
+            "<code>разбан</code> — снять бан.<br>"
+            "<code>снять варн</code> — снять последнее активное предупреждение.<br>"
+            "<code>-смс</code> — удалить сообщение, на которое ответил.</p></details>"
+            "<details><summary>🎖 Ранги</summary>"
+            "<p><code>повысить</code> / <code>понизить</code> — изменить ранг на один уровень.<br>"
+            "0 — Участник; 1 — Модератор I; 2 — Модератор II; "
+            "3 — Старший модератор; 4 — Главный модератор; 5 — Владелец.</p></details>"
+            "<details><summary>📝 Заметки · ранги 4–5</summary>"
+            "<p><code>+заметка Название</code>, затем текст со следующей строки — создать заметку "
+            "(название до 20 символов, форматирование сохраняется).<br>"
+            "<code>заметки</code> — компактный список раскрывающихся заметок.<br>"
+            "<code>заметка 12</code> — открыть заметку №12.<br>"
+            "<code>-заметка 12</code> — удалить заметку №12.</p></details>"
+            "<details><summary>⏱ Сроки наказаний</summary>"
+            "<p>Поддерживаются секунды, минуты, часы и дни, а также <code>навсегда</code>.<br>"
+            "Примеры: <code>30 секунд</code>, <code>10 минут</code>, <code>2 часа</code>, <code>1 день</code>.<br>"
+            "Третий активный варн автоматически выдаёт мут на 1 час. Сроки отслеживаются автоматически.</p></details>"
+            "<details><summary>📌 Как указать пользователя</summary>"
+            "<p>Ответь командой на сообщение пользователя или добавь в конец команды кастомный ID / "
+            "<code>@username</code>.<br>Пример: <code>молчи 10 минут @username</code>.<br>"
+            "Нельзя применять наказания к себе или пользователям с равным/более высоким рангом.</p></details>"
+            "<details><summary>🔐 Права</summary>"
+            "<p>Удаление сообщений, варны и снятие варнов — с 1 ранга.<br>"
+            "Муты и снятие мутов — со 2 ранга.<br>Баны — с 3 ранга.<br>"
+            "Разбан, управление рангами и заметками — с 4 ранга.<br>"
+            "Повышать и понижать можно только пользователей ниже себя.</p></details>"
+            "<details><summary>⚠️ Защита чата</summary>"
+            "<p>Айзен удаляет распознаваемые ссылки Telegram и WhatsApp и пытается заблокировать отправителя. "
+            "Для модерации и защиты чата боту нужны соответствующие права администратора.</p></details>"
         )
-        await message.answer(help_text, parse_mode="HTML")
+        await message.bot.send_rich_message(
+            chat_id=message.chat.id,
+            rich_message=InputRichMessage(html=help_html)
+        )
 
     @dp.message(F.text.regexp(r"(?i)^профиль(?:\s+\d+)?\s*$"))
     async def profile_handler(message: Message):
