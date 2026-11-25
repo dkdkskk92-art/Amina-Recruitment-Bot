@@ -88,3 +88,27 @@ class Note(Base):
     entities_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ReportRoute(Base):
+    __tablename__ = "report_routes"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_chat_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    destination_chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Report(Base):
+    __tablename__ = "reports"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    destination_chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    author_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    target_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    text: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    destination_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    handled_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    handled_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True)
