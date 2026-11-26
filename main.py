@@ -167,17 +167,29 @@ async def profile(message: Message):
         name = " ".join(x for x in (user.first_name, user.last_name) if x) or "Без имени"
         username = f"\nUsername: @{user.username}" if user.username else ""
         registered = user.registered_at.strftime("%d.%m.%Y") if user.registered_at else "неизвестно"
-        avatar_file_id, avatar_type = user.avatar_file_id, user.avatar_type
+        legacy_avatar_file_id = user.avatar_file_id
         caption = (
-            f"👤 <b>Профиль</b>\nИмя: {name}{username}\nКастомный ID: <code>{user.id}</code>"
-            f"\nРанг: {RANKS.get(user.rank, 'Участник')} ({user.rank})"
+            f"👤 <b>Профиль</b>\nИмя: {html_decoration.quote(name)}{html_decoration.quote(username)}\nКастомный ID: <code>{user.id}</code>"
+            f"\nРанг: {html_decoration.quote(RANKS.get(user.rank, 'Участник'))} ({user.rank})"
             f"\nАктивные варны: {warns}\nАктивные муты: {mutes}\nАктивные баны: {bans}"
             f"\nРегистрация: {registered}"
         )
-    if avatar_file_id and avatar_type == "photo":
-        await message.answer_photo(avatar_file_id, caption=caption, parse_mode="HTML")
-    elif avatar_file_id and avatar_type == "video":
-        await message.answer_video(avatar_file_id, caption=caption, parse_mode="HTML")
+    # Получаем актуальную фотографию профиля Telegram автоматически.
+    avatar_file_id = None
+    try:
+        photos = await message.bot.get_user_profile_photos(user.telegram_id, limit=1)
+        if photos.total_count and photos.photos and photos.photos[0]:
+            avatar_file_id = photos.photos[0][-1].file_id
+    except Exception:
+        logging.exception("Не удалось получить фото профиля Telegram для user_id=%s", user.telegram_id)
+    # Старую вручную сохранённую аватарку используем только как резервный вариант.
+    avatar_file_id = avatar_file_id or legacy_avatar_file_id
+    if avatar_file_id:
+        try:
+            await message.answer_photo(avatar_file_id, caption=caption, parse_mode="HTML")
+        except Exception:
+            logging.exception("Не удалось отправить аватарку профиля")
+            await message.answer(caption, parse_mode="HTML")
     else:
         await message.answer(caption, parse_mode="HTML")
 
@@ -589,7 +601,7 @@ async def main():
             "<details><summary>👤 Профили</summary>"
             "<p><code>профиль</code> — свой профиль.<br>"
             "<code>профиль 123</code> — профиль по кастомному ID.<br>"
-            "Чтобы установить аватар, отправь фото или видео с подписью <code>аватар</code>.</p></details>"
+            "Аватарка автоматически берётся из фотографии профиля Telegram, если она доступна боту.</p></details>"
             "<details><summary>🛡 Модерация</summary>"
             "<p><code>варн 1 день</code> — предупреждение.<br>"
             "<code>молчи 10 минут</code> — мут.<br>"
