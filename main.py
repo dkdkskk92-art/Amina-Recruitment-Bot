@@ -116,6 +116,31 @@ class RegistrationMiddleware(BaseMiddleware):
 async def get_user(session, telegram_id):
     return await session.scalar(select(User).where(User.telegram_id == telegram_id))
 
+
+async def allocate_public_id(session, model, owner_field, owner_id: int, active_only: bool = False):
+    query = select(model.public_id).where(owner_field == owner_id, model.public_id.is_not(None))
+    if active_only:
+        query = query.where(model.active.is_(True))
+    used = set()
+    for value in (await session.scalars(query)).all():
+        try:
+            prefix, suffix = value.rsplit("_", 1)
+            if int(prefix) == owner_id:
+                used.add(int(suffix))
+        except (ValueError, AttributeError):
+            continue
+    number = 1
+    while number in used:
+        number += 1
+    return f"{owner_id}_{number}"
+
+
+def parse_public_id(value: str):
+    match = re.fullmatch(r"(\d+)_(\d+)", value.strip())
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
 async def resolve_target(message: Message, session, raw: str):
     if message.reply_to_message and message.reply_to_message.from_user:
         return await get_user(session, message.reply_to_message.from_user.id)
@@ -238,49 +263,49 @@ async def save_note(message: Message):
         if not actor or actor.rank < 4:
             await message.reply("⛔ Заметки доступны только с 4 ранга.")
             return
+        public_id = await allocate_public_id(session, Note, Note.created_by, actor.id)
         note = Note(title=title, body=body,
                     entities_json=json.dumps(entities, ensure_ascii=False) if entities else None,
-                    created_by=actor.id)
+                    created_by=actor.id, public_id=public_id)
         session.add(note)
         await session.commit()
-        await session.refresh(note)
-        note_id = note.id
-    await message.reply(f"📝 Заметка «{title}» сохранена. Номер: <code>{note_id}</code>", parse_mode="HTML")
+    await message.reply(f"📝 Заметка «{html_decoration.quote(title)}» сохранена. ID: <code>{public_id}</code>", parse_mode="HTML")
 
 async def delete_note(message: Message):
     parts = (message.text or "").split(maxsplit=1)
-    if len(parts) != 2 or not parts[1].strip().isdigit():
-        await message.reply("Укажи номер: -заметка 12")
+    if len(parts) != 2 or not parse_public_id(parts[1].strip()):
+        await message.reply("Укажи ID заметки: -заметка 25_1")
         return
-    note_id = int(parts[1].strip())
+    note_public_id = parts[1].strip()
     async with Session() as session:
         actor = await get_user(session, message.from_user.id)
         if not actor or actor.rank < 4:
             await message.reply("⛔ Заметки доступны только с 4 ранга.")
             return
-        note = await session.get(Note, note_id)
+        note = await session.scalar(select(Note).where(Note.public_id == note_public_id))
         if not note:
-            await message.reply("Заметка с таким номером не найдена.")
+            await message.reply("Заметка с таким ID не найдена.")
             return
         title = note.title
         await session.delete(note)
         await session.commit()
-    await message.reply(f"🗑 Заметка №{note_id} «{title}» удалена.")
+    await message.reply(f"🗑 Заметка <code>{note_public_id}</code> «{html_decoration.quote(title)}» удалена.", parse_mode="HTML")
 
 async def show_note(message: Message):
     parts = (message.text or "").split(maxsplit=1)
-    if len(parts) != 2 or not parts[1].strip().isdigit():
+    if len(parts) != 2 or not parse_public_id(parts[1].strip()):
         return
+    note_public_id = parts[1].strip()
     async with Session() as session:
         actor = await get_user(session, message.from_user.id)
         if not actor or actor.rank < 4:
             await message.reply("⛔ Заметки доступны только с 4 ранга.")
             return
-        note = await session.get(Note, int(parts[1].strip()))
+        note = await session.scalar(select(Note).where(Note.public_id == note_public_id))
         if not note:
-            await message.reply("Заметка с таким номером не найдена.")
+            await message.reply("Заметка с таким ID не найдена.")
             return
-        note_id, title, body = note.id, note.title, note.body
+        note_id, title, body = note.public_id, note.title, note.body
         raw_entities = json.loads(note.entities_json) if note.entities_json else []
     entities = [MessageEntity.model_validate(item) for item in raw_entities]
     await message.answer(f"📝 <b>Заметка №{note_id}: {title}</b>", parse_mode="HTML")
@@ -292,9 +317,9 @@ async def list_notes(message: Message):
         if not actor or actor.rank < 4:
             await message.reply("⛔ Заметки доступны только с 4 ранга.")
             return
-        notes = (await session.scalars(select(Note).order_by(Note.id.asc()))).all()
+        notes = (await session.scalars(select(Note).order_by(Note.created_by.asc(), Note.public_id.asc()))).all()
         note_data = [
-            (note.id, note.title, note.body,
+            (note.public_id or str(note.id), note.title, note.body,
              [MessageEntity.model_validate(item) for item in json.loads(note.entities_json)]
              if note.entities_json else [])
             for note in notes
