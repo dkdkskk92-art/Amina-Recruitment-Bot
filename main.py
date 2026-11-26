@@ -222,15 +222,15 @@ async def profile(message: Message):
         )).all()
 
         name = " ".join(x for x in (user.first_name, user.last_name) if x) or "Без имени"
-        username = f"\\nUsername: @{user.username}" if user.username else ""
+        username = f"\nUsername: @{user.username}" if user.username else ""
         registered = user.registered_at.strftime("%d.%m.%Y") if user.registered_at else "неизвестно"
         legacy_avatar_file_id = user.avatar_file_id
         telegram_id = user.telegram_id
         caption = (
-            f"👤 <b>Профиль</b>\\nИмя: {html_decoration.quote(name)}{html_decoration.quote(username)}\\nКастомный ID: <code>{user.id}</code>"
-            f"\\nРанг: {html_decoration.quote(RANKS.get(user.rank, 'Участник'))} ({user.rank})"
-            f"\\nАктивные варны: {len(warns)}\\nАктивные муты: {len(mutes)}\\nАктивные баны: {len(bans)}"
-            f"\\nРегистрация: {registered}"
+            f"👤 <b>Профиль</b>\nИмя: {html_decoration.quote(name)}{html_decoration.quote(username)}\nКастомный ID: <code>{user.id}</code>"
+            f"\nРанг: {html_decoration.quote(RANKS.get(user.rank, 'Участник'))} ({user.rank})"
+            f"\nАктивные варны: {len(warns)}\nАктивные муты: {len(mutes)}\nАктивные баны: {len(bans)}"
+            f"\nРегистрация: {registered}"
         )
 
     # Сначала пробуем получить актуальную фотографию профиля Telegram.
