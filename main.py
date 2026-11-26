@@ -16,13 +16,13 @@ from database import Base, engine, Session, User, Chat, Warning, Mute, Ban, Puni
 
 RANKS = {0:"Участник", 1:"Модератор I", 2:"Модератор II", 3:"Старший модератор", 4:"Главный модератор", 5:"Владелец"}
 DURATION_RE = re.compile(r"(?i)(навсегда|\d+\s*(?:секунд(?:у|ы)?|сек|минут(?:у|ы)?|мин|час(?:а|ов)?|дн(?:я|ей)?|день))")
-URL_RE = re.compile(r"(?i)(?<![@\\w])(?:(?:https?://|www\\.)[^\\s<>]+|(?:[a-z0-9-]+\\.)+[a-z]{2,}(?:/[^\\s<>]*)?)")
+URL_RE = re.compile(r"(?i)(?<![@\w])(?:(?:https?://|www\.)[^\s<>]+|(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s<>]*)?)")
 TG_PUBLIC_RE = re.compile(r"(?i)^(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/([A-Za-z0-9_]{5,})(?:[/?#].*)?$")
 TG_INVITE_RE = re.compile(r"(?i)^(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/(?:\+|joinchat/)")
 
 
 def normalize_link(value: str) -> str:
-    value = value.strip().strip(".,);]}>\\"'").lower()
+    value = value.strip().rstrip(".,);]}>").lower()
     if value.startswith("www."):
         value = "https://" + value
     if not re.match(r"^[a-z][a-z0-9+.-]*://", value):
