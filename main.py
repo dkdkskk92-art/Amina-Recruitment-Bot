@@ -195,7 +195,7 @@ async def profile(message: Message):
             logging.exception("Не удалось отправить сохранённую аватарку профиля")
 
     # Локальная заглушка используется, если у пользователя нет доступного фото.
-    placeholder_path = Path(__file__).resolve().parent / "avatar.jpg"
+    placeholder_path = Path(__file__).resolve().parent / "avatar.png"
     if placeholder_path.is_file():
         try:
             await message.answer_photo(
