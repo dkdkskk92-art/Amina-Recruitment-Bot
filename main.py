@@ -476,12 +476,15 @@ async def unpunish(message: Message, action: str, required: int):
         and message.reply_to_message.from_user
         and message.reply_to_message.from_user.id != message.bot.id
     )
+    use_reply_target = bool(reply_target and (
+        action != "снять варн" or len(raw.split()) == 1
+    ))
 
     if action == "снять варн":
         parts = raw.split()
         if len(parts) == 2:
             target_raw, number_raw = parts
-        elif len(parts) == 1 and reply_target:
+        elif len(parts) == 1 and use_reply_target:
             target_raw = ""
             number_raw = parts[0]
         else:
@@ -494,7 +497,7 @@ async def unpunish(message: Message, action: str, required: int):
 
     async with Session() as session:
         actor = await get_user(session, message.from_user.id)
-        if reply_target:
+        if use_reply_target:
             target = await get_user(session, message.reply_to_message.from_user.id)
         else:
             token = target_raw.strip().split()[-1] if target_raw.strip() else ""
