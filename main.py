@@ -692,6 +692,8 @@ async def main():
         help_html = (
             "<h1>🦋 Айзен | помощник</h1>"
             "<blockquote>Твой помощник по управлению чатом. Выбери нужный раздел и используй команды ниже.</blockquote>"
+            "<details><summary>👥 Администрация</summary>"
+            "<p><code>админы</code> — показать список администрации по рангам и ссылки на Telegram.</p></details>"
             "<details><summary>👤 Профили</summary>"
             "<p><code>профиль</code> — открыть свой профиль.<br>"
             "<code>профиль 123</code> — открыть профиль по кастомному ID.<br>"
@@ -703,7 +705,8 @@ async def main():
             "<code>бан навсегда</code> — заблокировать пользователя.<br>"
             "<code>говори</code> — снять мут.<br>"
             "<code>разбан</code> — снять бан.<br>"
-            "<code>снять варн</code> — снять активное предупреждение.<br>"
+            "<code>снять варн 25_1</code> — снять конкретный варн (ответом на сообщение).<br>"
+            "<code>снять варн @username 25_1</code> — снять варн указанного пользователя.<br>"
             "<code>-смс</code> — удалить сообщение (ответом на него).</p></details>"
             "<details><summary>🎖️ Ранги и полномочия</summary>"
             "<p>0 — Участник<br>1 — Модератор I<br>2 — Модератор II<br>"
@@ -714,8 +717,9 @@ async def main():
             "<p><code>+заметка Название</code>, затем текст со следующей строки — создать заметку.<br>"
             "Название — до 20 символов, форматирование сохраняется.<br>"
             "<code>заметки</code> — показать список.<br>"
-            "<code>заметка 12</code> — открыть заметку №12.<br>"
-            "<code>-заметка 12</code> — удалить заметку №12.</p></details>"
+            "<code>заметка 25_1</code> — открыть заметку по ID.<br>"
+            "<code>-заметка 25_1</code> — удалить заметку по ID.<br>"
+            "ID заметки формируется как кастомный ID автора и порядковый номер.</p></details>"
             "<details><summary>⏱️ Сроки наказаний</summary>"
             "<p>Поддерживаются секунды, минуты, часы, дни и <code>навсегда</code>.<br>"
             "Примеры: <code>30 секунд</code>, <code>10 минут</code>, <code>2 часа</code>, <code>1 день</code>.<br>"
@@ -910,6 +914,32 @@ async def main():
 
 
 
+    @dp.message(F.text.regexp(r"(?i)^админы\s*$"))
+    async def admins_handler(message: Message):
+        rank_names = {5: "Владелец", 4: "Старший администратор", 3: "Старший модератор",
+                      2: "Модератор II", 1: "Модератор I"}
+        async with Session() as session:
+            admins = (await session.scalars(
+                select(User).where(User.rank >= 1).order_by(User.rank.desc(), User.first_name.asc())
+            )).all()
+            rows = [(u.rank, u.first_name, u.last_name, u.username, u.telegram_id) for u in admins]
+        if not rows:
+            await message.reply("Список администрации пока пуст.")
+            return
+        lines = ["🛡 <b>Администрация</b>"]
+        for rank in range(5, 0, -1):
+            members = [u for u in rows if u[0] == rank]
+            if not members:
+                continue
+            lines.append(f"\n<b>{rank} ранг — {rank_names[rank]}</b>")
+            for _, first, last, username, telegram_id in members:
+                name = html_decoration.quote(" ".join(x for x in (first, last) if x) or "Без имени")
+                link = f"https://t.me/{username}" if username else f"tg://user?id={telegram_id}"
+                suffix = f" · @{html_decoration.quote(username)}" if username else ""
+                lines.append(f'<a href="{link}">{name}</a>{suffix}')
+        lines.append('\nПо всем вопросам писать <a href="https://t.me/kaoruko_off">t.me/kaoruko_off</a>')
+        await message.reply("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
+
     @dp.message(F.text.regexp(r"(?i)^профиль(?:\s+\d+)?\s*$"))
     async def profile_handler(message: Message):
         await profile(message)
@@ -938,7 +968,7 @@ async def main():
     async def remove_note_handler(message: Message):
         await delete_note(message)
 
-    @dp.message(F.text.regexp(r"(?i)^заметка\s+\d+\s*$"))
+    @dp.message(F.text.regexp(r"(?i)^заметка\s+\d+_\d+\s*$"))
     async def show_note_handler(message: Message):
         await show_note(message)
 
