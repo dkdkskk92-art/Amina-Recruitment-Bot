@@ -3,11 +3,12 @@ import json
 import logging
 import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.enums import ChatType
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, MessageEntity, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions, InputRichMessage
+from aiogram.types import Message, MessageEntity, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions, InputRichMessage, FSInputFile
 from aiogram.utils.text_decorations import html_decoration
 from sqlalchemy import select, func, text
 
@@ -168,30 +169,46 @@ async def profile(message: Message):
         username = f"\nUsername: @{user.username}" if user.username else ""
         registered = user.registered_at.strftime("%d.%m.%Y") if user.registered_at else "неизвестно"
         legacy_avatar_file_id = user.avatar_file_id
+        telegram_id = user.telegram_id
         caption = (
             f"👤 <b>Профиль</b>\nИмя: {html_decoration.quote(name)}{html_decoration.quote(username)}\nКастомный ID: <code>{user.id}</code>"
             f"\nРанг: {html_decoration.quote(RANKS.get(user.rank, 'Участник'))} ({user.rank})"
             f"\nАктивные варны: {warns}\nАктивные муты: {mutes}\nАктивные баны: {bans}"
             f"\nРегистрация: {registered}"
         )
-    # Получаем актуальную фотографию профиля Telegram автоматически.
+    # Сначала пробуем получить актуальную фотографию профиля Telegram.
     avatar_file_id = None
     try:
-        photos = await message.bot.get_user_profile_photos(user.telegram_id, limit=1)
+        photos = await message.bot.get_user_profile_photos(telegram_id, limit=1)
         if photos.total_count and photos.photos and photos.photos[0]:
             avatar_file_id = photos.photos[0][-1].file_id
     except Exception:
-        logging.exception("Не удалось получить фото профиля Telegram для user_id=%s", user.telegram_id)
-    # Старую вручную сохранённую аватарку используем только как резервный вариант.
+        logging.exception("Не удалось получить фото профиля Telegram для user_id=%s", telegram_id)
+
+    # Ранее сохранённая вручную аватарка — дополнительный резерв.
     avatar_file_id = avatar_file_id or legacy_avatar_file_id
     if avatar_file_id:
         try:
             await message.answer_photo(avatar_file_id, caption=caption, parse_mode="HTML")
+            return
         except Exception:
-            logging.exception("Не удалось отправить аватарку профиля")
-            await message.answer(caption, parse_mode="HTML")
-    else:
-        await message.answer(caption, parse_mode="HTML")
+            logging.exception("Не удалось отправить сохранённую аватарку профиля")
+
+    # Локальная заглушка используется, если у пользователя нет доступного фото.
+    placeholder_path = Path(__file__).resolve().parent / "avatar.jpg"
+    if placeholder_path.is_file():
+        try:
+            await message.answer_photo(
+                FSInputFile(str(placeholder_path)),
+                caption=caption,
+                parse_mode="HTML",
+            )
+            return
+        except Exception:
+            logging.exception("Не удалось отправить локальную заглушку аватарки")
+
+    await message.answer(caption, parse_mode="HTML")
+
 
 def utf16_length(value: str) -> int:
     return len(value.encode("utf-16-le")) // 2
