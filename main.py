@@ -958,8 +958,7 @@ async def main():
             for _, first, last, username, telegram_id in members:
                 name = html_decoration.quote(" ".join(x for x in (first, last) if x) or "Без имени")
                 link = f"https://t.me/{username}" if username else f"tg://user?id={telegram_id}"
-                suffix = f" · @{html_decoration.quote(username)}" if username else ""
-                lines.append(f'<a href="{link}">{name}</a>{suffix}')
+                lines.append(f'<a href="{link}">{name}</a>')
         lines.append('\nПо всем вопросам писать <a href="https://t.me/kaoruko_off">t.me/kaoruko_off</a>')
         await message.reply("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
