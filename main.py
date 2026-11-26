@@ -220,13 +220,13 @@ async def profile(message: Message):
         )).all()
 
         name = " ".join(x for x in (user.first_name, user.last_name) if x) or "Без имени"
-        username = f"\nUsername: @{user.username}" if user.username else ""
+        username = f"<br>Username: @{html_decoration.quote(user.username)}" if user.username else ""
         registered = user.registered_at.strftime("%d.%m.%Y") if user.registered_at else "неизвестно"
         profile_html = (
-            f"👤 <b>Профиль</b>\n"
-            f"Имя: {html_decoration.quote(name)}{html_decoration.quote(username)}\n"
-            f"Кастомный ID: <code>{user.id}</code>\n"
-            f"Ранг: {html_decoration.quote(RANKS.get(user.rank, 'Участник'))} ({user.rank})\n"
+            f"👤 <b>Профиль</b><br>"
+            f"Имя: {html_decoration.quote(name)}{username}<br>"
+            f"Кастомный ID: <code>{user.id}</code><br>"
+            f"Ранг: {html_decoration.quote(RANKS.get(user.rank, 'Участник'))} ({user.rank})<br>"
             f"Регистрация: {registered}"
         )
 
