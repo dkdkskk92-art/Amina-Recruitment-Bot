@@ -16,13 +16,13 @@ from database import Base, engine, Session, User, Chat, Warning, Mute, Ban, Puni
 
 RANKS = {0:"Участник", 1:"Модератор I", 2:"Модератор II", 3:"Старший модератор", 4:"Главный модератор", 5:"Владелец"}
 DURATION_RE = re.compile(r"(?i)(навсегда|\d+\s*(?:секунд(?:у|ы)?|сек|минут(?:у|ы)?|мин|час(?:а|ов)?|дн(?:я|ей)?|день))")
-URL_RE = re.compile(r"(?i)(?:(?:https?://|www\\.)[^\\s<>]+|(?:t\\.me|telegram\\.me|wa\\.me|chat\\.whatsapp\\.com)/[^\\s<>]+)")
-TG_PUBLIC_RE = re.compile(r"(?i)^(?:https?://)?(?:www\\.)?(?:t\\.me|telegram\\.me)/([A-Za-z0-9_]{5,})(?:[/?#].*)?$")
-TG_INVITE_RE = re.compile(r"(?i)^(?:https?://)?(?:www\\.)?(?:t\\.me|telegram\\.me)/(?:\\+|joinchat/)")
+URL_RE = re.compile(r"(?i)(?<![@\\w])(?:(?:https?://|www\\.)[^\\s<>]+|(?:[a-z0-9-]+\\.)+[a-z]{2,}(?:/[^\\s<>]*)?)")
+TG_PUBLIC_RE = re.compile(r"(?i)^(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/([A-Za-z0-9_]{5,})(?:[/?#].*)?$")
+TG_INVITE_RE = re.compile(r"(?i)^(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/(?:\+|joinchat/)")
 
 
 def normalize_link(value: str) -> str:
-    value = value.strip().strip(".,);]}>\\\"'").lower()
+    value = value.strip().strip(".,);]}>\\"'").lower()
     if value.startswith("www."):
         value = "https://" + value
     if not re.match(r"^[a-z][a-z0-9+.-]*://", value):
@@ -620,6 +620,10 @@ async def main():
             "В чате администрации: <code>+репорты из чата -100...</code> — подключить источник.<br>"
             "Любой участник может отправить <code>репорт</code> с текстом, ответив на сообщение нарушителя. " 
             "Один активный репорт на пользователя до решения администрации.</p></details>"
+            "<details><summary>🔗 Белый список ссылок · ранги 4–5</summary>"
+            "<p><code>+ссылка https://example.com</code> — добавить разрешённую ссылку.<br>"
+            "<code>-ссылка https://example.com</code> — удалить её.<br>"
+            "<code>Ссылки</code> — показать общий список.</p></details>"
             "<details><summary>⚠️ Защита чата</summary>"
             "<p>Айзен удаляет распознаваемые ссылки Telegram и WhatsApp и пытается заблокировать отправителя. "
             "Для модерации и защиты чата боту нужны соответствующие права администратора.</p></details>"
@@ -876,7 +880,7 @@ async def main():
         except Exception:
             await query.answer("Не удалось снять бан. Проверь права бота.", show_alert=True)
 
-    @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) & F.text.regexp(r"(?i)^\\+ссылка\\s+"))
+    @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) & F.text.regexp(r"(?i)^\+ссылка\s+"))
     async def add_allowed_link(message: Message):
         raw = message.text.split(maxsplit=1)[1].strip()
         normalized = normalize_link(raw)
@@ -893,7 +897,7 @@ async def main():
             await session.commit()
         await message.reply("✅ Ссылка добавлена в общий белый список.")
 
-    @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) & F.text.regexp(r"(?i)^-ссылка\\s+"))
+    @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) & F.text.regexp(r"(?i)^-ссылка\s+"))
     async def remove_allowed_link(message: Message):
         raw = message.text.split(maxsplit=1)[1].strip()
         normalized = normalize_link(raw)
@@ -910,7 +914,7 @@ async def main():
             await session.commit()
         await message.reply("🗑 Ссылка удалена из белого списка.")
 
-    @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) & F.text.regexp(r"(?i)^ссылки\\s*$"))
+    @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) & F.text.regexp(r"(?i)^ссылки\s*$"))
     async def list_allowed_links(message: Message):
         async with Session() as session:
             actor = await get_user(session, message.from_user.id)
@@ -923,7 +927,7 @@ async def main():
             await message.reply("Белый список ссылок пуст.")
             return
         safe = [html_decoration.quote(value) for value in values]
-        await message.reply("🔗 <b>Общий белый список:</b>\\n" + "\\n".join("• " + value for value in safe), parse_mode="HTML")
+        await message.reply("🔗 <b>Общий белый список:</b>\n" + "\n".join("• " + value for value in safe), parse_mode="HTML")
 
     @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
     async def link_guard(message: Message):
