@@ -138,10 +138,8 @@ async def allocate_public_id(session, model, owner_field, owner_id: int, active_
 
 
 def parse_public_id(value: str):
-    match = re.fullmatch(r"(\d+)_(\d+)", value.strip())
-    if not match:
-        return None
-    return int(match.group(1)), int(match.group(2))
+    return int(value.strip()) if re.fullmatch(r"\d+", value.strip()) else None
+
 
 async def allocate_warning_number(session, user_id: int):
     await session.scalar(select(User.id).where(User.id == user_id).with_for_update())
@@ -222,50 +220,15 @@ async def profile(message: Message):
         )).all()
 
         name = " ".join(x for x in (user.first_name, user.last_name) if x) or "Без имени"
-        username = f"\nUsername: @{user.username}" if user.username else ""
+        username = f"\\nUsername: @{user.username}" if user.username else ""
         registered = user.registered_at.strftime("%d.%m.%Y") if user.registered_at else "неизвестно"
-        legacy_avatar_file_id = user.avatar_file_id
-        telegram_id = user.telegram_id
-        caption = (
-            f"👤 <b>Профиль</b>\nИмя: {html_decoration.quote(name)}{html_decoration.quote(username)}\nКастомный ID: <code>{user.id}</code>"
-            f"\nРанг: {html_decoration.quote(RANKS.get(user.rank, 'Участник'))} ({user.rank})"
-            f"\nАктивные варны: {len(warns)}\nАктивные муты: {len(mutes)}\nАктивные баны: {len(bans)}"
-            f"\nРегистрация: {registered}"
+        profile_html = (
+            f"👤 <b>Профиль</b>\\n"
+            f"Имя: {html_decoration.quote(name)}{html_decoration.quote(username)}\\n"
+            f"Кастомный ID: <code>{user.id}</code>\\n"
+            f"Ранг: {html_decoration.quote(RANKS.get(user.rank, 'Участник'))} ({user.rank})\\n"
+            f"Регистрация: {registered}"
         )
-
-    # Сначала пробуем получить актуальную фотографию профиля Telegram.
-    avatar_file_id = None
-    try:
-        photos = await message.bot.get_user_profile_photos(telegram_id, limit=1)
-        if photos.total_count and photos.photos and photos.photos[0]:
-            avatar_file_id = photos.photos[0][-1].file_id
-    except Exception:
-        logging.exception("Не удалось получить фото профиля Telegram для user_id=%s", telegram_id)
-
-    avatar_file_id = avatar_file_id or legacy_avatar_file_id
-    sent_profile = False
-    if avatar_file_id:
-        try:
-            await message.answer_photo(avatar_file_id, caption=caption, parse_mode="HTML")
-            sent_profile = True
-        except Exception:
-            logging.exception("Не удалось отправить сохранённую аватарку профиля")
-
-    if not sent_profile:
-        placeholder_path = Path(__file__).resolve().parent / "avatar.png"
-        if placeholder_path.is_file():
-            try:
-                await message.answer_photo(
-                    FSInputFile(str(placeholder_path)),
-                    caption=caption,
-                    parse_mode="HTML",
-                )
-                sent_profile = True
-            except Exception:
-                logging.exception("Не удалось отправить локальную заглушку аватарки")
-
-    if not sent_profile:
-        await message.answer(caption, parse_mode="HTML")
 
     def format_record(record):
         created = record.created_at.strftime("%d.%m.%Y %H:%M") if record.created_at else "неизвестно"
@@ -291,7 +254,7 @@ async def profile(message: Message):
     )
     await message.bot.send_rich_message(
         chat_id=message.chat.id,
-        rich_message=InputRichMessage(html=punishment_html)
+        rich_message=InputRichMessage(html=profile_html + punishment_html)
     )
 
 def utf16_length(value: str) -> int:
@@ -322,18 +285,20 @@ async def save_note(message: Message):
         if not actor or actor.rank < 4:
             await message.reply("⛔ Заметки доступны только с 4 ранга.")
             return
-        public_id = await allocate_public_id(session, Note, Note.created_by, actor.id)
         note = Note(title=title, body=body,
                     entities_json=json.dumps(entities, ensure_ascii=False) if entities else None,
-                    created_by=actor.id, public_id=public_id)
+                    created_by=actor.id)
         session.add(note)
+        await session.flush()
+        note.public_id = str(note.id)
+        public_id = note.public_id
         await session.commit()
     await message.reply(f"📝 Заметка «{html_decoration.quote(title)}» сохранена. ID: <code>{public_id}</code>", parse_mode="HTML")
 
 async def delete_note(message: Message):
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) != 2 or not parse_public_id(parts[1].strip()):
-        await message.reply("Укажи ID заметки: -заметка 25_1")
+        await message.reply("Укажи ID заметки: -заметка 1")
         return
     note_public_id = parts[1].strip()
     async with Session() as session:
@@ -364,7 +329,7 @@ async def show_note(message: Message):
         if not note:
             await message.reply("Заметка с таким ID не найдена.")
             return
-        note_id, title, body = note.public_id, note.title, note.body
+        note_id, title, body = str(note.id), note.title, note.body
         raw_entities = json.loads(note.entities_json) if note.entities_json else []
     entities = [MessageEntity.model_validate(item) for item in raw_entities]
     await message.answer(f"📝 <b>Заметка №{note_id}: {title}</b>", parse_mode="HTML")
@@ -376,9 +341,9 @@ async def list_notes(message: Message):
         if not actor or actor.rank < 4:
             await message.reply("⛔ Заметки доступны только с 4 ранга.")
             return
-        notes = (await session.scalars(select(Note).order_by(Note.created_by.asc(), Note.public_id.asc()))).all()
+        notes = (await session.scalars(select(Note).order_by(Note.id.asc()))).all()
         note_data = [
-            (note.public_id or str(note.id), note.title, note.body,
+            (str(note.id), note.title, note.body,
              [MessageEntity.model_validate(item) for item in json.loads(note.entities_json)]
              if note.entities_json else [])
             for note in notes
@@ -734,12 +699,8 @@ async def main():
             FROM ranked WHERE w.id = ranked.id
         """))
         await conn.execute(text("""
-            WITH ranked AS (
-                SELECT id, created_by, ROW_NUMBER() OVER (PARTITION BY created_by ORDER BY id) AS n
-                FROM notes WHERE public_id IS NULL
-            )
-            UPDATE notes n SET public_id = ranked.created_by::text || '_' || ranked.n::text
-            FROM ranked WHERE n.id = ranked.id
+            UPDATE notes SET public_id = id::text
+            WHERE public_id IS DISTINCT FROM id::text
         """))
     bot = Bot(settings.bot_token)
     dp = Dispatcher()
@@ -760,7 +721,7 @@ async def main():
             "<p><code>профиль</code> — открыть свой профиль.<br>"
             "<code>профиль 123</code> — открыть профиль по кастомному ID.<br>"
             "При ответе на сообщение командой <code>профиль</code> откроется профиль его автора.<br>"
-            "Аватарка берётся из Telegram автоматически, если она доступна боту.</p></details>"
+            "Профиль отображается текстом, без фотографий.</p></details>"
             "<details><summary>🛡️ Модерация</summary>"
             "<p><code>варн 1 день</code> — выдать предупреждение.<br>"
             "<code>молчи 10 минут</code> — выдать мут.<br>"
@@ -780,9 +741,9 @@ async def main():
             "<p><code>+заметка Название</code>, затем текст со следующей строки — создать заметку.<br>"
             "Название — до 20 символов, форматирование сохраняется.<br>"
             "<code>заметки</code> — показать список.<br>"
-            "<code>заметка 25_1</code> — открыть заметку по ID.<br>"
-            "<code>-заметка 25_1</code> — удалить заметку по ID.<br>"
-            "ID заметки формируется как кастомный ID автора и порядковый номер.</p></details>"
+            "<code>заметка 1</code> — открыть заметку по ID.<br>"
+            "<code>-заметка 1</code> — удалить заметку по ID.<br>"
+            "ID заметки — уникальный порядковый номер записи.</p></details>"
             "<details><summary>⏱️ Сроки наказаний</summary>"
             "<p>Поддерживаются секунды, минуты, часы, дни и <code>навсегда</code>.<br>"
             "Примеры: <code>30 секунд</code>, <code>10 минут</code>, <code>2 часа</code>, <code>1 день</code>.<br>"
@@ -1023,23 +984,7 @@ async def main():
     async def profile_handler(message: Message):
         await profile(message)
 
-    @dp.message((F.photo | F.video) & F.caption.regexp(r"(?i)^аватар$"))
-    async def avatar_handler(message: Message):
-        async with Session() as session:
-            user = await get_user(session, message.from_user.id)
-            if not user:
-                await message.reply("Сначала напиши «профиль».")
-                return
-            if message.photo:
-                user.avatar_file_id = message.photo[-1].file_id
-                user.avatar_type = "photo"
-            else:
-                user.avatar_file_id = message.video.file_id
-                user.avatar_type = "video"
-            await session.commit()
-        await message.reply("✅ Аватарка сохранена. Теперь она будет отображаться в твоём профиле.")
-
-    @dp.message(F.text.regexp(r"(?is)^\+заметка(?:\s|$)"))
+avatar handler    @dp.message(F.text.regexp(r"(?is)^\+заметка(?:\s|$)"))
     async def add_note_handler(message: Message):
         await save_note(message)
 
@@ -1047,7 +992,7 @@ async def main():
     async def remove_note_handler(message: Message):
         await delete_note(message)
 
-    @dp.message(F.text.regexp(r"(?i)^заметка\s+\d+_\d+\s*$"))
+    @dp.message(F.text.regexp(r"(?i)^заметка\s+\d+\s*$"))
     async def show_note_handler(message: Message):
         await show_note(message)
 
