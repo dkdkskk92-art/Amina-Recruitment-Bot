@@ -206,20 +206,33 @@ async def profile(message: Message):
         if not user:
             await message.reply("Пользователь не найден.")
             return
-        warns = await session.scalar(select(func.count(Warning.id)).where(Warning.user_id == user.id, Warning.active.is_(True))) or 0
-        mutes = await session.scalar(select(func.count(Mute.id)).where(Mute.user_id == user.id, Mute.active.is_(True))) or 0
-        bans = await session.scalar(select(func.count(Ban.id)).where(Ban.user_id == user.id, Ban.active.is_(True))) or 0
+
+        user_id = user.id
+        warns = (await session.scalars(
+            select(Warning).where(Warning.user_id == user_id, Warning.active.is_(True))
+            .order_by(Warning.created_at.desc())
+        )).all()
+        mutes = (await session.scalars(
+            select(Mute).where(Mute.user_id == user_id, Mute.active.is_(True))
+            .order_by(Mute.created_at.desc())
+        )).all()
+        bans = (await session.scalars(
+            select(Ban).where(Ban.user_id == user_id, Ban.active.is_(True))
+            .order_by(Ban.created_at.desc())
+        )).all()
+
         name = " ".join(x for x in (user.first_name, user.last_name) if x) or "Без имени"
-        username = f"\nUsername: @{user.username}" if user.username else ""
+        username = f"\\nUsername: @{user.username}" if user.username else ""
         registered = user.registered_at.strftime("%d.%m.%Y") if user.registered_at else "неизвестно"
         legacy_avatar_file_id = user.avatar_file_id
         telegram_id = user.telegram_id
         caption = (
-            f"👤 <b>Профиль</b>\nИмя: {html_decoration.quote(name)}{html_decoration.quote(username)}\nКастомный ID: <code>{user.id}</code>"
-            f"\nРанг: {html_decoration.quote(RANKS.get(user.rank, 'Участник'))} ({user.rank})"
-            f"\nАктивные варны: {warns}\nАктивные муты: {mutes}\nАктивные баны: {bans}"
-            f"\nРегистрация: {registered}"
+            f"👤 <b>Профиль</b>\\nИмя: {html_decoration.quote(name)}{html_decoration.quote(username)}\\nКастомный ID: <code>{user.id}</code>"
+            f"\\nРанг: {html_decoration.quote(RANKS.get(user.rank, 'Участник'))} ({user.rank})"
+            f"\\nАктивные варны: {len(warns)}\\nАктивные муты: {len(mutes)}\\nАктивные баны: {len(bans)}"
+            f"\\nРегистрация: {registered}"
         )
+
     # Сначала пробуем получить актуальную фотографию профиля Telegram.
     avatar_file_id = None
     try:
@@ -229,30 +242,57 @@ async def profile(message: Message):
     except Exception:
         logging.exception("Не удалось получить фото профиля Telegram для user_id=%s", telegram_id)
 
-    # Ранее сохранённая вручную аватарка — дополнительный резерв.
     avatar_file_id = avatar_file_id or legacy_avatar_file_id
+    sent_profile = False
     if avatar_file_id:
         try:
             await message.answer_photo(avatar_file_id, caption=caption, parse_mode="HTML")
-            return
+            sent_profile = True
         except Exception:
             logging.exception("Не удалось отправить сохранённую аватарку профиля")
 
-    # Локальная заглушка используется, если у пользователя нет доступного фото.
-    placeholder_path = Path(__file__).resolve().parent / "avatar.png"
-    if placeholder_path.is_file():
-        try:
-            await message.answer_photo(
-                FSInputFile(str(placeholder_path)),
-                caption=caption,
-                parse_mode="HTML",
-            )
-            return
-        except Exception:
-            logging.exception("Не удалось отправить локальную заглушку аватарки")
+    if not sent_profile:
+        placeholder_path = Path(__file__).resolve().parent / "avatar.png"
+        if placeholder_path.is_file():
+            try:
+                await message.answer_photo(
+                    FSInputFile(str(placeholder_path)),
+                    caption=caption,
+                    parse_mode="HTML",
+                )
+                sent_profile = True
+            except Exception:
+                logging.exception("Не удалось отправить локальную заглушку аватарки")
 
-    await message.answer(caption, parse_mode="HTML")
+    if not sent_profile:
+        await message.answer(caption, parse_mode="HTML")
 
+    def format_record(record):
+        created = record.created_at.strftime("%d.%m.%Y %H:%M") if record.created_at else "неизвестно"
+        expires = record.expires_at.strftime("%d.%m.%Y %H:%M") if record.expires_at else "навсегда"
+        return f"• {created} · чат <code>{record.chat_id}</code> · до: {expires}"
+
+    def details_block(title, records, warning=False):
+        if not records:
+            body = "Нет активных наказаний."
+        else:
+            entries = []
+            for record in records:
+                number = f"№{html_decoration.quote(str(record.public_id))} · " if warning and record.public_id else ""
+                entries.append(number + format_record(record))
+            body = "<br>".join(entries)
+        return f"<details><summary>{title} · {len(records)}</summary><p>{body}</p></details>"
+
+    punishment_html = (
+        "<h3>📋 Активные наказания</h3>"
+        + details_block("⚠️ Варны", warns, warning=True)
+        + details_block("🔇 Муты", mutes)
+        + details_block("⛔ Баны", bans)
+    )
+    await message.bot.send_rich_message(
+        chat_id=message.chat.id,
+        rich_message=InputRichMessage(html=punishment_html)
+    )
 
 def utf16_length(value: str) -> int:
     return len(value.encode("utf-16-le")) // 2
