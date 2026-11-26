@@ -12,13 +12,52 @@ from aiogram.utils.text_decorations import html_decoration
 from sqlalchemy import select, func, text
 
 from config import settings
-from database import Base, engine, Session, User, Chat, Warning, Mute, Ban, PunishmentLog, Note, ReportRoute, Report
+from database import Base, engine, Session, User, Chat, Warning, Mute, Ban, PunishmentLog, Note, ReportRoute, Report, LinkWhitelist
 
 RANKS = {0:"Участник", 1:"Модератор I", 2:"Модератор II", 3:"Старший модератор", 4:"Главный модератор", 5:"Владелец"}
 DURATION_RE = re.compile(r"(?i)(навсегда|\d+\s*(?:секунд(?:у|ы)?|сек|минут(?:у|ы)?|мин|час(?:а|ов)?|дн(?:я|ей)?|день))")
-BLOCKED_LINK = re.compile(
-    r"(?i)(?:https?://)?(?:www\.)?(?:t\.me/(?:\+|joinchat/|[A-Za-z0-9_]{5,})|telegram\.me/(?:\+|joinchat/|[A-Za-z0-9_]{5,})|chat\.whatsapp\.com/[A-Za-z0-9_-]+|wa\.me/[A-Za-z0-9]+)"
-)
+URL_RE = re.compile(r"(?i)(?:(?:https?://|www\\.)[^\\s<>]+|(?:t\\.me|telegram\\.me|wa\\.me|chat\\.whatsapp\\.com)/[^\\s<>]+)")
+TG_PUBLIC_RE = re.compile(r"(?i)^(?:https?://)?(?:www\\.)?(?:t\\.me|telegram\\.me)/([A-Za-z0-9_]{5,})(?:[/?#].*)?$")
+TG_INVITE_RE = re.compile(r"(?i)^(?:https?://)?(?:www\\.)?(?:t\\.me|telegram\\.me)/(?:\\+|joinchat/)")
+
+
+def normalize_link(value: str) -> str:
+    value = value.strip().strip(".,);]}>\\\"'").lower()
+    if value.startswith("www."):
+        value = "https://" + value
+    if not re.match(r"^[a-z][a-z0-9+.-]*://", value):
+        value = "https://" + value
+    from urllib.parse import urlsplit
+    parsed = urlsplit(value)
+    return (parsed.hostname or "").removeprefix("www.") + parsed.path.rstrip("/")
+
+
+def message_links(message: Message) -> list[str]:
+    body = message.text or message.caption or ""
+    links = set(URL_RE.findall(body))
+    for entity in (message.entities or []) + (message.caption_entities or []):
+        if entity.type == "text_link" and entity.url:
+            links.add(entity.url)
+    return list(links)
+
+
+async def is_person_profile_link(bot: Bot, url: str) -> bool:
+    if TG_INVITE_RE.match(url):
+        return False
+    match = TG_PUBLIC_RE.match(url)
+    if not match:
+        return False
+    username = match.group(1)
+    # Bot usernames are required by Telegram to end in "bot".
+    if username.lower().endswith("bot"):
+        return False
+    try:
+        chat = await bot.get_chat("@" + username)
+        return chat.type not in ("group", "supergroup", "channel")
+    except Exception:
+        # Safe default: an unresolved t.me username is treated as a person's profile.
+        return True
+
 
 def parse_expiry(value: str):
     if value.lower() == "навсегда":
@@ -837,21 +876,87 @@ async def main():
         except Exception:
             await query.answer("Не удалось снять бан. Проверь права бота.", show_alert=True)
 
+    @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) & F.text.regexp(r"(?i)^\\+ссылка\\s+"))
+    async def add_allowed_link(message: Message):
+        raw = message.text.split(maxsplit=1)[1].strip()
+        normalized = normalize_link(raw)
+        async with Session() as session:
+            actor = await get_user(session, message.from_user.id)
+            if not actor or actor.rank < 4:
+                await message.reply("⛔ Управлять белым списком ссылок могут только ранги 4–5.")
+                return
+            existing = await session.scalar(select(LinkWhitelist).where(LinkWhitelist.normalized_link == normalized))
+            if existing:
+                await message.reply("Эта ссылка уже находится в белом списке.")
+                return
+            session.add(LinkWhitelist(link=raw, normalized_link=normalized, created_by=actor.id))
+            await session.commit()
+        await message.reply("✅ Ссылка добавлена в общий белый список.")
+
+    @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) & F.text.regexp(r"(?i)^-ссылка\\s+"))
+    async def remove_allowed_link(message: Message):
+        raw = message.text.split(maxsplit=1)[1].strip()
+        normalized = normalize_link(raw)
+        async with Session() as session:
+            actor = await get_user(session, message.from_user.id)
+            if not actor or actor.rank < 4:
+                await message.reply("⛔ Управлять белым списком ссылок могут только ранги 4–5.")
+                return
+            existing = await session.scalar(select(LinkWhitelist).where(LinkWhitelist.normalized_link == normalized))
+            if not existing:
+                await message.reply("Такой ссылки нет в белом списке.")
+                return
+            await session.delete(existing)
+            await session.commit()
+        await message.reply("🗑 Ссылка удалена из белого списка.")
+
+    @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) & F.text.regexp(r"(?i)^ссылки\\s*$"))
+    async def list_allowed_links(message: Message):
+        async with Session() as session:
+            actor = await get_user(session, message.from_user.id)
+            if not actor or actor.rank < 4:
+                await message.reply("⛔ Просматривать белый список могут только ранги 4–5.")
+                return
+            entries = (await session.scalars(select(LinkWhitelist).order_by(LinkWhitelist.id.asc()))).all()
+            values = [entry.link for entry in entries]
+        if not values:
+            await message.reply("Белый список ссылок пуст.")
+            return
+        safe = [html_decoration.quote(value) for value in values]
+        await message.reply("🔗 <b>Общий белый список:</b>\\n" + "\\n".join("• " + value for value in safe), parse_mode="HTML")
+
     @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
     async def link_guard(message: Message):
-        body = message.text or message.caption or ""
-        if not body or not message.from_user or message.from_user.is_bot or not BLOCKED_LINK.search(body):
+        if not message.from_user:
+            return
+        links = message_links(message)
+        if not links:
+            return
+        async with Session() as session:
+            allowed = {row.normalized_link for row in (await session.scalars(select(LinkWhitelist))).all()}
+        blocked = []
+        for link in links:
+            if normalize_link(link) in allowed:
+                continue
+            if await is_person_profile_link(message.bot, link):
+                continue
+            blocked.append(link)
+        if not blocked:
             return
         try:
             await message.delete()
         except Exception:
-            pass
+            logging.exception("Не удалось удалить сообщение со ссылкой в чате %s", message.chat.id)
+            return
+        if message.from_user.is_bot:
+            return
         async with Session() as session:
             user = await get_user(session, message.from_user.id)
             if not user:
                 return
             session.add(Ban(user_id=user.id, chat_id=message.chat.id, moderator_id=None, expires_at=None))
-            session.add(PunishmentLog(user_id=user.id, moderator_id=None, chat_id=message.chat.id, action="автобан за ссылку"))
+            session.add(PunishmentLog(user_id=user.id, moderator_id=None, chat_id=message.chat.id,
+                                      action="автобан за запрещённую ссылку", details=", ".join(blocked)[:1000]))
             await session.commit()
             custom_id, telegram_id = user.id, user.telegram_id
         try:
