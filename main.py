@@ -118,6 +118,8 @@ async def get_user(session, telegram_id):
 
 
 async def allocate_public_id(session, model, owner_field, owner_id: int, active_only: bool = False):
+    # Блокируем владельца ID, чтобы параллельные выдачи не получили одинаковый номер.
+    await session.scalar(select(User.id).where(User.id == owner_id).with_for_update())
     query = select(model.public_id).where(owner_field == owner_id, model.public_id.is_not(None))
     if active_only:
         query = query.where(model.active.is_(True))
@@ -560,6 +562,7 @@ async def apply_report_punishment(query: CallbackQuery, report_id: int, action: 
         source_chat_id = report.source_chat_id
         target_tg_id, target_custom_id = target.telegram_id, target.id
     expiry = None if duration_code == "forever" else datetime.now(timezone.utc) + duration_map[duration_code]
+    warning_public_id = None
     try:
         if action == "mute":
             await query.bot.restrict_chat_member(source_chat_id, target_tg_id,
@@ -593,7 +596,10 @@ async def apply_report_punishment(query: CallbackQuery, report_id: int, action: 
             report.status, report.handled_at = "handled", datetime.now(timezone.utc)
             await session.commit()
         await render_report(query.bot, report_id)
-        await query.answer("Наказание применено в исходной группе.")
+        answer_text = "Наказание применено в исходной группе."
+        if action == "warn" and warning_public_id:
+            answer_text += f" ID варна: {warning_public_id}"
+        await query.answer(answer_text)
     except Exception:
         logging.exception("Ошибка применения наказания по репорту %s", report_id)
         async with Session() as session:
