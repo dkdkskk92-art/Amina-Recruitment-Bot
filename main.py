@@ -960,7 +960,16 @@ async def main():
                 link = f"https://t.me/{username}" if username else f"tg://user?id={telegram_id}"
                 lines.append(f'<a href="{link}">{name}</a>')
         lines.append('\nПо всем вопросам писать <a href="https://t.me/kaoruko_off">t.me/kaoruko_off</a>')
-        await message.reply("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
+        admins_image = Path(__file__).resolve().parent / "admins.png"
+        if admins_image.is_file():
+            await message.reply_photo(
+                FSInputFile(str(admins_image)),
+                caption=lines[0],
+                parse_mode="HTML",
+            )
+            await message.answer("\n".join(lines[1:]), parse_mode="HTML", disable_web_page_preview=True)
+        else:
+            await message.reply("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
     @dp.message(F.text.regexp(r"(?i)^профиль(?:\s+\d+)?\s*$"))
     async def profile_handler(message: Message):
