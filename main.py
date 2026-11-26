@@ -529,10 +529,12 @@ def report_duration_markup(report_id: int, action: str):
     choices = [("10 минут", "m10"), ("1 час", "h1"), ("1 день", "d1"), ("7 дней", "d7")]
     if action == "ban":
         choices.append(("Навсегда", "forever"))
-    return InlineKeyboardMarkup(inline_keyboard=[
+    rows = [
         [InlineKeyboardButton(text=label, callback_data=f"rdo:{report_id}:{action}:{code}")]
         for label, code in choices
-    ])
+    ]
+    rows.append([InlineKeyboardButton(text="← Назад", callback_data=f"rback:{report_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def render_report(bot: Bot, report_id: int):
@@ -746,6 +748,25 @@ async def main():
         else:
             await query.message.edit_reply_markup(reply_markup=report_duration_markup(report_id, action))
             await query.answer("Выбери срок наказания.")
+
+    @dp.callback_query(F.data.startswith("rback:"))
+    async def report_action_back(query: CallbackQuery):
+        try:
+            report_id = int(query.data.split(":")[1])
+        except (ValueError, AttributeError):
+            await query.answer("Некорректная кнопка.", show_alert=True)
+            return
+        async with Session() as session:
+            actor = await get_user(session, query.from_user.id)
+            report = await session.get(Report, report_id)
+            if not actor or actor.rank < 1:
+                await query.answer("Недостаточно прав.", show_alert=True)
+                return
+            if not report or report.status != "pending":
+                await query.answer("Этот репорт уже обрабатывается или обработан.", show_alert=True)
+                return
+        await query.message.edit_reply_markup(reply_markup=report_action_markup(report_id))
+        await query.answer("Вернулись к выбору действия.")
 
     @dp.callback_query(F.data.startswith("rdo:"))
     async def report_action_execute(query: CallbackQuery):
