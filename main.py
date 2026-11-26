@@ -381,7 +381,9 @@ async def moderation_action(message: Message, action: str, required_rank: int):
             await message.reply("⛔ Нельзя применять действие к себе или к равному/старшему рангу.")
             return
         if action == "варн":
-            session.add(Warning(user_id=target.id, chat_id=message.chat.id, moderator_id=actor.id, expires_at=expiry))
+            warning_public_id = await allocate_public_id(session, Warning, Warning.user_id, target.id, active_only=True)
+            session.add(Warning(user_id=target.id, chat_id=message.chat.id, moderator_id=actor.id,
+                                expires_at=expiry, public_id=warning_public_id))
             await session.flush()
             count = await session.scalar(select(func.count(Warning.id)).where(Warning.user_id == target.id, Warning.active.is_(True))) or 0
             session.add(PunishmentLog(user_id=target.id, moderator_id=actor.id, chat_id=message.chat.id, action="варн"))
@@ -397,7 +399,7 @@ async def moderation_action(message: Message, action: str, required_rank: int):
                 except Exception:
                     await message.reply("Варн записан, но Telegram не применил автоматический мут. Проверь права бота.")
                     return
-            await message.reply(f"⚠️ Варн выдан. Активных варнов: {count}." + (" Автоматический мут на 1 час." if auto_mute else ""))
+            await message.reply(f"⚠️ Варн выдан. ID: <code>{warning_public_id}</code>. Активных варнов: {count}." + (" Автоматический мут на 1 час." if auto_mute else ""), parse_mode="HTML")
         elif action == "молчи":
             session.add(Mute(user_id=target.id, chat_id=message.chat.id, moderator_id=actor.id, expires_at=expiry))
             session.add(PunishmentLog(user_id=target.id, moderator_id=actor.id, chat_id=message.chat.id, action="мут"))
@@ -443,9 +445,31 @@ async def change_rank(message: Message, step: int):
 
 async def unpunish(message: Message, action: str, required: int):
     raw = message.text.split(maxsplit=1)[1] if len(message.text.split(maxsplit=1)) > 1 else ""
+    warning_public_id = None
+    parsed = None
+    target_raw = raw
+    if action == "снять варн":
+        parts = raw.split()
+        if message.reply_to_message and message.reply_to_message.from_user and len(parts) == 1:
+            warning_public_id = parts[0]
+            parsed = parse_public_id(warning_public_id)
+            target_raw = ""
+        elif len(parts) == 1:
+            warning_public_id = parts[0]
+            parsed = parse_public_id(warning_public_id)
+            target_raw = ""
+        elif len(parts) == 2:
+            target_raw, warning_public_id = parts
+            parsed = parse_public_id(warning_public_id)
+        if not parsed:
+            await message.reply("Формат: снять варн @username 25_1 или ответом на сообщение: снять варн 25_1")
+            return
     async with Session() as session:
         actor = await get_user(session, message.from_user.id)
-        target = await resolve_target(message, session, raw)
+        if action == "снять варн" and not target_raw:
+            target = await session.get(User, parsed[0])
+        else:
+            target = await resolve_target(message, session, target_raw)
         if not actor or actor.rank < required:
             await message.reply("⛔ Недостаточно прав.")
             return
@@ -453,20 +477,29 @@ async def unpunish(message: Message, action: str, required: int):
             await message.reply("Пользователь не найден или его ранг равен/выше вашего.")
             return
         model = {"говори": Mute, "разбан": Ban, "снять варн": Warning}[action]
-        item = await session.scalar(select(model).where(model.user_id == target.id,
-            model.chat_id == message.chat.id, model.active.is_(True)).order_by(model.created_at.desc()))
+        if action == "снять варн":
+            if parsed[0] != target.id:
+                await message.reply("ID варна не принадлежит указанному пользователю.")
+                return
+            item = await session.scalar(select(Warning).where(
+                Warning.public_id == warning_public_id, Warning.user_id == target.id,
+                Warning.chat_id == message.chat.id, Warning.active.is_(True)))
+        else:
+            item = await session.scalar(select(model).where(model.user_id == target.id,
+                model.chat_id == message.chat.id, model.active.is_(True)).order_by(model.created_at.desc()))
         if not item:
-            await message.reply("Активное наказание в этом чате не найдено.")
+            await message.reply("Активное наказание с таким ID в этом чате не найдено.")
             return
         item.active = False
-        session.add(PunishmentLog(user_id=target.id, moderator_id=actor.id, chat_id=message.chat.id, action=f"снятие: {action}"))
+        session.add(PunishmentLog(user_id=target.id, moderator_id=actor.id, chat_id=message.chat.id,
+                                  action=f"снятие: {action}", details=warning_public_id if action == "снять варн" else None))
         await session.commit()
         try:
             if action == "говори":
                 await clear_mute(message.bot, message.chat.id, target.telegram_id)
             elif action == "разбан":
                 await message.bot.unban_chat_member(message.chat.id, target.telegram_id, only_if_banned=True)
-            await message.reply("Готово. Наказание снято.")
+            await message.reply(f"Готово. Наказание снято{f' (ID {warning_public_id})' if warning_public_id else ''}.")
         except Exception:
             await message.reply("Статус обновлён в базе, но Telegram не выполнил действие. Проверь права бота.")
 
@@ -537,8 +570,9 @@ async def apply_report_punishment(query: CallbackQuery, report_id: int, action: 
                 until_date=int(expiry.timestamp()) if expiry else None)
         else:
             async with Session() as session:
+                warning_public_id = await allocate_public_id(session, Warning, Warning.user_id, target_custom_id, active_only=True)
                 session.add(Warning(user_id=target_custom_id, chat_id=source_chat_id,
-                                    moderator_id=actor.id, expires_at=expiry))
+                                    moderator_id=actor.id, expires_at=expiry, public_id=warning_public_id))
                 session.add(PunishmentLog(user_id=target_custom_id, moderator_id=actor.id,
                     chat_id=source_chat_id, action="варн по репорту", details="7 дней"))
                 await session.commit()
@@ -627,6 +661,24 @@ async def main():
         await conn.run_sync(Base.metadata.create_all)
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_file_id VARCHAR(255)"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_type VARCHAR(10)"))
+        await conn.execute(text("ALTER TABLE warnings ADD COLUMN IF NOT EXISTS public_id VARCHAR(40)"))
+        await conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS public_id VARCHAR(40)"))
+        await conn.execute(text("""
+            WITH ranked AS (
+                SELECT id, user_id, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY id) AS n
+                FROM warnings WHERE active = TRUE AND public_id IS NULL
+            )
+            UPDATE warnings w SET public_id = ranked.user_id::text || '_' || ranked.n::text
+            FROM ranked WHERE w.id = ranked.id
+        """))
+        await conn.execute(text("""
+            WITH ranked AS (
+                SELECT id, created_by, ROW_NUMBER() OVER (PARTITION BY created_by ORDER BY id) AS n
+                FROM notes WHERE public_id IS NULL
+            )
+            UPDATE notes n SET public_id = ranked.created_by::text || '_' || ranked.n::text
+            FROM ranked WHERE n.id = ranked.id
+        """))
     bot = Bot(settings.bot_token)
     dp = Dispatcher()
     dp.message.outer_middleware(RegistrationMiddleware())
