@@ -1001,15 +1001,23 @@ async def main():
                 lines.append(f'<a href="{link}">{name}</a>')
         lines.append('\nПо всем вопросам писать <a href="https://t.me/kaoruko_off">t.me/kaoruko_off</a>')
         admins_image = Path(__file__).resolve().parent / "admins.png"
-        if admins_image.is_file():
-            await message.reply_photo(
+        admins_caption = "\n".join(lines)
+        if admins_image.is_file() and utf16_length(admins_caption) <= 1024:
+            await message.answer_photo(
+                FSInputFile(str(admins_image)),
+                caption=admins_caption,
+                parse_mode="HTML",
+            )
+        elif admins_image.is_file():
+            # Telegram limits photo captions to 1024 UTF-16 units.
+            await message.answer_photo(
                 FSInputFile(str(admins_image)),
                 caption=lines[0],
                 parse_mode="HTML",
             )
             await message.answer("\n".join(lines[1:]), parse_mode="HTML", disable_web_page_preview=True)
         else:
-            await message.reply("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
+            await message.reply(admins_caption, parse_mode="HTML", disable_web_page_preview=True)
 
     @dp.message(F.text.regexp(r"(?i)^профиль(?:\s+\d+)?\s*$"))
     async def profile_handler(message: Message):
