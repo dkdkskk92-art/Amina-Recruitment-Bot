@@ -43,6 +43,7 @@ class Warning(Base):
     moderator_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     expires_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    public_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 class Mute(Base):
@@ -87,6 +88,7 @@ class Note(Base):
     body: Mapped[str] = mapped_column(Text)
     entities_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    public_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
