@@ -471,53 +471,83 @@ async def unpunish(message: Message, action: str, required: int):
     raw = message.text.split(maxsplit=1)[1] if len(message.text.split(maxsplit=1)) > 1 else ""
     warning_number = None
     target_raw = raw
+    reply_target = (
+        message.reply_to_message
+        and message.reply_to_message.from_user
+        and message.reply_to_message.from_user.id != message.bot.id
+    )
+
     if action == "снять варн":
         parts = raw.split()
-        if message.reply_to_message and message.reply_to_message.from_user:
+        if reply_target:
             if len(parts) != 1:
                 await message.reply("Ответь на сообщение пользователя и укажи номер варна: снять варн 2")
                 return
-            target_raw = ""
             number_raw = parts[0]
         elif len(parts) == 2:
             target_raw, number_raw = parts
         else:
-            await message.reply("Формат: снять варн @username 2, снять варн 123 2 или ответом на сообщение: снять варн 2")
+            await message.reply("Формат: снять варн @username 2, снять варн 123 2 или ответом на сообщение пользователя: снять варн 2")
             return
         if not number_raw.isdigit() or int(number_raw) < 1:
             await message.reply("Номер варна должен быть положительным числом.")
             return
         warning_number = str(int(number_raw))
+
     async with Session() as session:
         actor = await get_user(session, message.from_user.id)
-        target = await resolve_target(message, session, target_raw)
+        if reply_target:
+            target = await get_user(session, message.reply_to_message.from_user.id)
+        else:
+            token = target_raw.strip().split()[-1] if target_raw.strip() else ""
+            if token.startswith("@"):
+                target = await session.scalar(
+                    select(User).where(func.lower(User.username) == token[1:].lower())
+                )
+            elif token.isdigit():
+                target = await session.get(User, int(token))
+            else:
+                target = None
+
         if not actor or actor.rank < required:
             await message.reply("⛔ Недостаточно прав.")
             return
         if not target or actor.rank <= target.rank:
             await message.reply("Пользователь не найден или его ранг равен/выше вашего.")
             return
+
         model = {"говори": Mute, "разбан": Ban, "снять варн": Warning}[action]
         if action == "снять варн":
             item = await session.scalar(select(Warning).where(
                 Warning.public_id == warning_number, Warning.user_id == target.id,
                 Warning.chat_id == message.chat.id, Warning.active.is_(True)))
         else:
-            item = await session.scalar(select(model).where(model.user_id == target.id,
-                model.chat_id == message.chat.id, model.active.is_(True)).order_by(model.created_at.desc()))
+            item = await session.scalar(select(model).where(
+                model.user_id == target.id, model.chat_id == message.chat.id,
+                model.active.is_(True)).order_by(model.created_at.desc()))
+
         if not item:
             await message.reply("Активное наказание с таким номером в этом чате не найдено.")
             return
+
         item.active = False
-        session.add(PunishmentLog(user_id=target.id, moderator_id=actor.id, chat_id=message.chat.id,
-                                  action=f"снятие: {action}", details=warning_number if action == "снять варн" else None))
+        session.add(PunishmentLog(
+            user_id=target.id, moderator_id=actor.id, chat_id=message.chat.id,
+            action=f"снятие: {action}",
+            details=warning_number if action == "снять варн" else None
+        ))
         await session.commit()
+
         try:
             if action == "говори":
                 await clear_mute(message.bot, message.chat.id, target.telegram_id)
             elif action == "разбан":
-                await message.bot.unban_chat_member(message.chat.id, target.telegram_id, only_if_banned=True)
-            await message.reply(f"Готово. Наказание снято{f' (варн №{warning_number})' if warning_number else ''}.")
+                await message.bot.unban_chat_member(
+                    message.chat.id, target.telegram_id, only_if_banned=True
+                )
+            await message.reply(
+                f"Готово. Наказание снято{f' (варн №{warning_number})' if warning_number else ''}."
+            )
         except Exception:
             await message.reply("Статус обновлён в базе, но Telegram не выполнил действие. Проверь права бота.")
 
