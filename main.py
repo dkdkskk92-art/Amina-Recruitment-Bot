@@ -648,7 +648,7 @@ async def main():
             "<details><summary>🔐 Права</summary>"
             "<p>Удаление сообщений, варны и снятие варнов — с 1 ранга.<br>"
             "Муты и снятие мутов — со 2 ранга.<br>Баны — с 3 ранга.<br>"
-            "Разбан, управление рангами и заметками — с 4 ранга.<br>"
+            "Разбан — с 3 ранга.<br>Управление рангами и заметками — с 4 ранга.<br>"
             "Повышать и понижать можно только пользователей ниже себя.</p></details>"
             "<details><summary>📨 Репорты</summary>"
             "<p><code>ид чата</code> — показать ID группы.<br>"
@@ -901,7 +901,7 @@ async def main():
     async def unmute_handler(message: Message): await unpunish(message, "говори", 2)
 
     @dp.message(F.text.regexp(r"(?i)^разбан(?:\s|$)"))
-    async def unban_handler(message: Message): await unpunish(message, "разбан", 4)
+    async def unban_handler(message: Message): await unpunish(message, "разбан", 3)
 
     @dp.message(F.text.regexp(r"(?i)^снять\s+варн(?:\s|$)"))
     async def unwarn_handler(message: Message): await unpunish(message, "снять варн", 1)
@@ -918,8 +918,8 @@ async def main():
             actor = await get_user(session, query.from_user.id)
             target = await session.get(User, custom_id)
             ban = await session.scalar(select(Ban).where(Ban.user_id == custom_id, Ban.chat_id == chat_id, Ban.active.is_(True)).order_by(Ban.created_at.desc()))
-            if not actor or actor.rank < 4 or not target or actor.rank <= target.rank or not ban:
-                await query.answer("Доступно рангам 4–5 для разблокировки младших рангов.", show_alert=True)
+            if not actor or actor.rank < 3 or not target or actor.rank <= target.rank or not ban:
+                await query.answer("⛔ Разбан доступен с 3 ранга. Снимать бан можно только пользователям с рангом ниже вашего.", show_alert=True)
                 return
             ban.active = False
             session.add(PunishmentLog(user_id=custom_id, moderator_id=actor.id, chat_id=chat_id, action="разбан кнопкой"))
