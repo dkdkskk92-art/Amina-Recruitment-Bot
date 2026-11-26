@@ -143,6 +143,23 @@ def parse_public_id(value: str):
         return None
     return int(match.group(1)), int(match.group(2))
 
+async def allocate_warning_number(session, user_id: int):
+    await session.scalar(select(User.id).where(User.id == user_id).with_for_update())
+    values = (await session.scalars(select(Warning.public_id).where(
+        Warning.user_id == user_id, Warning.active.is_(True), Warning.public_id.is_not(None)
+    ))).all()
+    used = set()
+    for value in values:
+        try:
+            used.add(int(value.rsplit("_", 1)[-1]))
+        except (ValueError, AttributeError):
+            continue
+    number = 1
+    while number in used:
+        number += 1
+    return str(number)
+
+
 async def resolve_target(message: Message, session, raw: str):
     if message.reply_to_message and message.reply_to_message.from_user:
         return await get_user(session, message.reply_to_message.from_user.id)
@@ -383,7 +400,7 @@ async def moderation_action(message: Message, action: str, required_rank: int):
             await message.reply("⛔ Нельзя применять действие к себе или к равному/старшему рангу.")
             return
         if action == "варн":
-            warning_public_id = await allocate_public_id(session, Warning, Warning.user_id, target.id, active_only=True)
+            warning_public_id = await allocate_warning_number(session, target.id)
             session.add(Warning(user_id=target.id, chat_id=message.chat.id, moderator_id=actor.id,
                                 expires_at=expiry, public_id=warning_public_id))
             await session.flush()
@@ -447,31 +464,28 @@ async def change_rank(message: Message, step: int):
 
 async def unpunish(message: Message, action: str, required: int):
     raw = message.text.split(maxsplit=1)[1] if len(message.text.split(maxsplit=1)) > 1 else ""
-    warning_public_id = None
-    parsed = None
+    warning_number = None
     target_raw = raw
     if action == "снять варн":
         parts = raw.split()
-        if message.reply_to_message and message.reply_to_message.from_user and len(parts) == 1:
-            warning_public_id = parts[0]
-            parsed = parse_public_id(warning_public_id)
+        if message.reply_to_message and message.reply_to_message.from_user:
+            if len(parts) != 1:
+                await message.reply("Ответь на сообщение пользователя и укажи номер варна: снять варн 2")
+                return
             target_raw = ""
-        elif len(parts) == 1:
-            warning_public_id = parts[0]
-            parsed = parse_public_id(warning_public_id)
-            target_raw = ""
+            number_raw = parts[0]
         elif len(parts) == 2:
-            target_raw, warning_public_id = parts
-            parsed = parse_public_id(warning_public_id)
-        if not parsed:
-            await message.reply("Формат: снять варн @username 25_1 или ответом на сообщение: снять варн 25_1")
+            target_raw, number_raw = parts
+        else:
+            await message.reply("Формат: снять варн @username 2, снять варн 123 2 или ответом на сообщение: снять варн 2")
             return
+        if not number_raw.isdigit() or int(number_raw) < 1:
+            await message.reply("Номер варна должен быть положительным числом.")
+            return
+        warning_number = str(int(number_raw))
     async with Session() as session:
         actor = await get_user(session, message.from_user.id)
-        if action == "снять варн" and not target_raw:
-            target = await session.get(User, parsed[0])
-        else:
-            target = await resolve_target(message, session, target_raw)
+        target = await resolve_target(message, session, target_raw)
         if not actor or actor.rank < required:
             await message.reply("⛔ Недостаточно прав.")
             return
@@ -480,28 +494,25 @@ async def unpunish(message: Message, action: str, required: int):
             return
         model = {"говори": Mute, "разбан": Ban, "снять варн": Warning}[action]
         if action == "снять варн":
-            if parsed[0] != target.id:
-                await message.reply("ID варна не принадлежит указанному пользователю.")
-                return
             item = await session.scalar(select(Warning).where(
-                Warning.public_id == warning_public_id, Warning.user_id == target.id,
+                Warning.public_id == warning_number, Warning.user_id == target.id,
                 Warning.chat_id == message.chat.id, Warning.active.is_(True)))
         else:
             item = await session.scalar(select(model).where(model.user_id == target.id,
                 model.chat_id == message.chat.id, model.active.is_(True)).order_by(model.created_at.desc()))
         if not item:
-            await message.reply("Активное наказание с таким ID в этом чате не найдено.")
+            await message.reply("Активное наказание с таким номером в этом чате не найдено.")
             return
         item.active = False
         session.add(PunishmentLog(user_id=target.id, moderator_id=actor.id, chat_id=message.chat.id,
-                                  action=f"снятие: {action}", details=warning_public_id if action == "снять варн" else None))
+                                  action=f"снятие: {action}", details=warning_number if action == "снять варн" else None))
         await session.commit()
         try:
             if action == "говори":
                 await clear_mute(message.bot, message.chat.id, target.telegram_id)
             elif action == "разбан":
                 await message.bot.unban_chat_member(message.chat.id, target.telegram_id, only_if_banned=True)
-            await message.reply(f"Готово. Наказание снято{f' (ID {warning_public_id})' if warning_public_id else ''}.")
+            await message.reply(f"Готово. Наказание снято{f' (варн №{warning_number})' if warning_number else ''}.")
         except Exception:
             await message.reply("Статус обновлён в базе, но Telegram не выполнил действие. Проверь права бота.")
 
@@ -573,7 +584,7 @@ async def apply_report_punishment(query: CallbackQuery, report_id: int, action: 
                 until_date=int(expiry.timestamp()) if expiry else None)
         else:
             async with Session() as session:
-                warning_public_id = await allocate_public_id(session, Warning, Warning.user_id, target_custom_id, active_only=True)
+                warning_public_id = await allocate_warning_number(session, target_custom_id)
                 session.add(Warning(user_id=target_custom_id, chat_id=source_chat_id,
                                     moderator_id=actor.id, expires_at=expiry, public_id=warning_public_id))
                 session.add(PunishmentLog(user_id=target_custom_id, moderator_id=actor.id,
@@ -670,11 +681,16 @@ async def main():
         await conn.execute(text("ALTER TABLE warnings ADD COLUMN IF NOT EXISTS public_id VARCHAR(40)"))
         await conn.execute(text("ALTER TABLE notes ADD COLUMN IF NOT EXISTS public_id VARCHAR(40)"))
         await conn.execute(text("""
+            UPDATE warnings
+            SET public_id = split_part(public_id, '_', 2)
+            WHERE public_id LIKE '%\\_%' ESCAPE '\\'
+        """))
+        await conn.execute(text("""
             WITH ranked AS (
                 SELECT id, user_id, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY id) AS n
                 FROM warnings WHERE active = TRUE AND public_id IS NULL
             )
-            UPDATE warnings w SET public_id = ranked.user_id::text || '_' || ranked.n::text
+            UPDATE warnings w SET public_id = ranked.n::text
             FROM ranked WHERE w.id = ranked.id
         """))
         await conn.execute(text("""
@@ -711,8 +727,9 @@ async def main():
             "<code>бан навсегда</code> — заблокировать пользователя.<br>"
             "<code>говори</code> — снять мут.<br>"
             "<code>разбан</code> — снять бан.<br>"
-            "<code>снять варн 25_1</code> — снять конкретный варн (ответом на сообщение).<br>"
-            "<code>снять варн @username 25_1</code> — снять варн указанного пользователя.<br>"
+            "<code>снять варн 2</code> — снять варн №2 (ответом на сообщение).<br>"
+            "<code>снять варн @username 2</code> — снять варн №2 у пользователя.<br>"
+            "<code>снять варн 123 2</code> — где 123 — кастомный ID пользователя.<br>"
             "<code>-смс</code> — удалить сообщение (ответом на него).</p></details>"
             "<details><summary>🎖️ Ранги и полномочия</summary>"
             "<p>0 — Участник<br>1 — Модератор I<br>2 — Модератор II<br>"
