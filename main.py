@@ -526,7 +526,10 @@ def report_action_markup(report_id: int):
 
 
 def report_duration_markup(report_id: int, action: str):
-    choices = [("10 минут", "m10"), ("1 час", "h1"), ("1 день", "d1"), ("7 дней", "d7")]
+    if action == "warn":
+        choices = [("Выдать варн на 7 дней", "d7")]
+    else:
+        choices = [("10 минут", "m10"), ("1 час", "h1"), ("1 день", "d1"), ("7 дней", "d7")]
     if action == "ban":
         choices.append(("Навсегда", "forever"))
     rows = [
@@ -743,11 +746,8 @@ async def main():
             if not actor or actor.rank < required or not target or actor.id == target.id or actor.rank <= target.rank:
                 await query.answer("Недостаточно прав или цель имеет равный/старший ранг.", show_alert=True)
                 return
-        if action == "warn":
-            await apply_report_punishment(query, report_id, action, "d7")
-        else:
-            await query.message.edit_reply_markup(reply_markup=report_duration_markup(report_id, action))
-            await query.answer("Выбери срок наказания.")
+        await query.message.edit_reply_markup(reply_markup=report_duration_markup(report_id, action))
+        await query.answer("Подтверди действие или вернись назад.")
 
     @dp.callback_query(F.data.startswith("rback:"))
     async def report_action_back(query: CallbackQuery):
