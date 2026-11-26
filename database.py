@@ -112,3 +112,12 @@ class Report(Base):
     handled_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
     handled_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class LinkWhitelist(Base):
+    __tablename__ = "link_whitelist"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    link: Mapped[str] = mapped_column(String(512), unique=True)
+    normalized_link: Mapped[str] = mapped_column(String(512), unique=True, index=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
