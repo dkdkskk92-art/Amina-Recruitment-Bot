@@ -42,6 +42,7 @@ def message_links(message: Message) -> list[str]:
 
 
 async def is_person_profile_link(bot: Bot, url: str) -> bool:
+    url = url.strip().rstrip(".,);]}>")
     if TG_INVITE_RE.match(url):
         return False
     match = TG_PUBLIC_RE.match(url)
