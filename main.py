@@ -468,7 +468,8 @@ async def change_rank(message: Message, step: int):
         await message.reply(f"Ранг пользователя <code>{target.id}</code>: {old} → {new_rank}.", parse_mode="HTML")
 
 async def unpunish(message: Message, action: str, required: int):
-    raw = message.text.split(maxsplit=1)[1] if len(message.text.split(maxsplit=1)) > 1 else ""
+    # Убираем полное имя команды, включая оба слова в «снять варн».
+    raw = (message.text or "")[len(action):].strip()
     warning_number = None
     target_raw = raw
     reply_target = (
