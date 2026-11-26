@@ -479,13 +479,11 @@ async def unpunish(message: Message, action: str, required: int):
 
     if action == "снять варн":
         parts = raw.split()
-        if reply_target:
-            if len(parts) != 1:
-                await message.reply("Ответь на сообщение пользователя и укажи номер варна: снять варн 2")
-                return
-            number_raw = parts[0]
-        elif len(parts) == 2:
+        if len(parts) == 2:
             target_raw, number_raw = parts
+        elif len(parts) == 1 and reply_target:
+            target_raw = ""
+            number_raw = parts[0]
         else:
             await message.reply("Формат: снять варн @username 2, снять варн 123 2 или ответом на сообщение пользователя: снять варн 2")
             return
