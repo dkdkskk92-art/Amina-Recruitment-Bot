@@ -12,6 +12,7 @@ from aiogram.types import Message, MessageEntity, CallbackQuery, InlineKeyboardM
 from aiogram.utils.text_decorations import html_decoration
 from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy import select, func, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from config import settings
 from database import Base, engine, Session, User, Chat, Warning, Mute, Ban, PunishmentLog, Note, ReportRoute, Report, LinkWhitelist, CommandAccess
@@ -852,10 +853,13 @@ async def main():
             WHERE public_id IS DISTINCT FROM id::text
         """))
     async with Session() as session:
-        for command_id, (_, _, default_access) in COMMANDS.items():
-            setting = await session.get(CommandAccess, command_id)
-            if setting is None:
-                session.add(CommandAccess(command_id=command_id, min_rank=default_access))
+        defaults = [
+            {"command_id": command_id, "min_rank": meta[2]}
+            for command_id, meta in COMMANDS.items()
+        ]
+        await session.execute(
+            pg_insert(CommandAccess).values(defaults).on_conflict_do_nothing(index_elements=["command_id"])
+        )
         await session.commit()
     bot = Bot(settings.bot_token)
     dp = Dispatcher()
