@@ -123,3 +123,9 @@ class LinkWhitelist(Base):
     normalized_link: Mapped[str] = mapped_column(String(512), unique=True, index=True)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CommandAccess(Base):
+    __tablename__ = "command_access"
+    command_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    min_rank: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
