@@ -10,12 +10,53 @@ from aiogram.enums import ChatType
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message, MessageEntity, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions, InputRichMessage, FSInputFile
 from aiogram.utils.text_decorations import html_decoration
+from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy import select, func, text
 
 from config import settings
-from database import Base, engine, Session, User, Chat, Warning, Mute, Ban, PunishmentLog, Note, ReportRoute, Report, LinkWhitelist
+from database import Base, engine, Session, User, Chat, Warning, Mute, Ban, PunishmentLog, Note, ReportRoute, Report, LinkWhitelist, CommandAccess
 
 RANKS = {0:"Участник", 1:"Модератор I", 2:"Модератор II", 3:"Старший модератор", 4:"Главный модератор", 5:"Владелец"}
+
+# Постоянные номера команд. Значения по умолчанию сохраняют прежние ограничения.
+COMMANDS = {
+    1: ("Профиль", "профиль", 0),
+    2: ("Удаление сообщения", "-смс", 1),
+    3: ("Бан", "бан", 3),
+    4: ("Варн", "варн", 1),
+    5: ("Мут", "молчи", 2),
+    6: ("Снятие мута", "говори", 2),
+    7: ("Разбан", "разбан", 3),
+    8: ("Снятие варна", "снять варн", 1),
+    9: ("Повышение ранга", "повысить", 4),
+    10: ("Понижение ранга", "понизить", 4),
+    11: ("Список администрации", "админы", 0),
+    12: ("Создание заметки", "+заметка", 4),
+    13: ("Удаление заметки", "-заметка", 4),
+    14: ("Просмотр заметки", "заметка", 4),
+    15: ("Список заметок", "заметки", 4),
+    16: ("Добавление ссылки", "+ссылка", 4),
+    17: ("Удаление ссылки", "-ссылка", 4),
+    18: ("Список ссылок", "ссылки", 4),
+    19: ("Репорт", "репорт", 0),
+    20: ("Настройка репортов", "+репорты из чата", 4),
+    21: ("ID чата", "ид чата", 0),
+    101: ("Покормить", "покормить", 0),
+}
+COMMAND_TRIGGERS = sorted(
+    ((meta[1], command_id) for command_id, meta in COMMANDS.items()),
+    key=lambda item: len(item[0]), reverse=True
+)
+
+def command_id_from_text(value: str) -> int | None:
+    first_line = (value or "").splitlines()[0].strip().lower() if value else ""
+    for trigger, command_id in COMMAND_TRIGGERS:
+        if first_line == trigger or first_line.startswith(trigger + " "):
+            return command_id
+    return None
+
+def rank_access_allowed(rank: int, min_rank: int) -> bool:
+    return min_rank != 6 and rank >= min_rank
 DURATION_RE = re.compile(r"(?i)(навсегда|\d+\s*(?:секунд(?:у|ы)?|сек|минут(?:у|ы)?|мин|час(?:а|ов)?|дн(?:я|ей)?|день))")
 URL_RE = re.compile(r"(?i)(?<![@\w])(?:(?:https?://|www\.)[^\s<>]+|(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s<>]*)?)")
 TG_PUBLIC_RE = re.compile(r"(?i)^(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/([A-Za-z0-9_]{5,})(?:[/?#].*)?$")
@@ -113,6 +154,23 @@ class RegistrationMiddleware(BaseMiddleware):
                 await session.commit()
         return await handler(event, data)
 
+class CommandAccessMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        if not isinstance(event, Message) or not event.text or not event.from_user or event.from_user.is_bot:
+            return await handler(event, data)
+        command_id = command_id_from_text(event.text)
+        if command_id is None:
+            return await handler(event, data)
+        async with Session() as session:
+            user = await get_user(session, event.from_user.id)
+            rank = user.rank if user else 0
+            setting = await session.get(CommandAccess, command_id)
+            min_rank = setting.min_rank if setting else COMMANDS[command_id][2]
+        if not rank_access_allowed(rank, min_rank):
+            await event.reply("⛔ У тебя нет доступа к этой команде.")
+            return
+        return await handler(event, data)
+
 async def get_user(session, telegram_id):
     return await session.scalar(select(User).where(User.telegram_id == telegram_id))
 
@@ -190,6 +248,86 @@ async def clear_mute(bot, chat_id, telegram_id):
 async def rank_for(session, telegram_id):
     user = await get_user(session, telegram_id)
     return user.rank if user else 0
+
+def telegram_profile_url(user: User) -> str:
+    return f"https://t.me/{user.username}" if user.username else f"tg://user?id={user.telegram_id}"
+
+def user_display_name(user: User) -> str:
+    return " ".join(part for part in (user.first_name, user.last_name) if part).strip() or "Без имени"
+
+async def resolve_rp_target(message: Message, session, raw: str):
+    replied = message.reply_to_message.from_user if message.reply_to_message else None
+    if replied and not replied.is_bot:
+        user = await get_user(session, replied.id)
+        if user is None:
+            user = User(telegram_id=replied.id, username=replied.username,
+                        first_name=replied.first_name or "", last_name=replied.last_name, rank=0)
+            session.add(user)
+            await session.flush()
+        return user
+    token = raw.strip().split()[0] if raw.strip() else ""
+    if token.startswith("@"):
+        return await session.scalar(select(User).where(func.lower(User.username) == token[1:].lower()))
+    if token.isdigit():
+        user = await session.get(User, int(token))
+        return user or await get_user(session, int(token))
+    return None
+
+async def send_rp_action(message: Message, emoji: str, verb: str):
+    if not message.from_user or message.from_user.is_bot:
+        return
+    lines = (message.text or "").split("\n", 1)
+    header = lines[0].strip()
+    parts = header.split(maxsplit=1)
+    target_raw = parts[1] if len(parts) > 1 else ""
+    extra_raw = lines[1] if len(lines) > 1 else ""
+    extra = extra_raw.strip()
+    if extra and "\n" in extra:
+        await message.reply("Дополнительный текст должен быть только на одной строке.")
+        return
+    if utf16_length(extra) > 20:
+        await message.reply("Дополнительный текст не должен превышать 20 символов.")
+        return
+    async with Session() as session:
+        actor = await get_user(session, message.from_user.id)
+        target = await resolve_rp_target(message, session, target_raw)
+        if not actor:
+            await message.reply("Не удалось определить твой профиль.")
+            return
+        if not target:
+            await message.reply("Пользователь не найден. Он должен хотя бы раз написать боту или появиться в группе с ботом.")
+            return
+        actor_name = user_display_name(actor)
+        target_name = user_display_name(target)
+        actor_url = telegram_profile_url(actor)
+        target_url = telegram_profile_url(target)
+        await session.commit()
+
+    main_text = f"{emoji} | {actor_name} {verb} {target_name}"
+    output = main_text + (f"\nТекст: {extra}" if extra else "")
+    entities = [
+        MessageEntity(type="text_link", offset=utf16_length(f"{emoji} | "),
+                      length=utf16_length(actor_name), url=actor_url),
+        MessageEntity(type="text_link", offset=utf16_length(f"{emoji} | {actor_name} {verb} "),
+                      length=utf16_length(target_name), url=target_url),
+    ]
+    if extra:
+        leading = len(extra_raw) - len(extra_raw.lstrip())
+        source_extra_offset = utf16_length(header + "\n" + extra_raw[:leading])
+        output_extra_offset = utf16_length(main_text + "\nТекст: ")
+        for entity in message.entities or []:
+            if entity.type == "custom_emoji" and entity.custom_emoji_id:
+                relative = entity.offset - source_extra_offset
+                if 0 <= relative and relative + entity.length <= utf16_length(extra):
+                    entities.append(MessageEntity(
+                        type="custom_emoji", offset=output_extra_offset + relative,
+                        length=entity.length, custom_emoji_id=entity.custom_emoji_id
+                    ))
+    try:
+        await message.answer(output, entities=entities, disable_web_page_preview=True)
+    except TelegramBadRequest:
+        fallback_entities = [entity for entity in entities if entity.type != "custom_emoji"]
+        await message.answer(output, entities=fallback_entities, disable_web_page_preview=True)
 
 async def profile(message: Message):
     parts = (message.text or "").split()
@@ -282,9 +420,6 @@ async def save_note(message: Message):
             })
     async with Session() as session:
         actor = await get_user(session, message.from_user.id)
-        if not actor or actor.rank < 4:
-            await message.reply("⛔ Заметки доступны только с 4 ранга.")
-            return
         note = Note(title=title, body=body,
                     entities_json=json.dumps(entities, ensure_ascii=False) if entities else None,
                     created_by=actor.id)
@@ -303,9 +438,6 @@ async def delete_note(message: Message):
     note_public_id = parts[1].strip()
     async with Session() as session:
         actor = await get_user(session, message.from_user.id)
-        if not actor or actor.rank < 4:
-            await message.reply("⛔ Заметки доступны только с 4 ранга.")
-            return
         note = await session.scalar(select(Note).where(Note.public_id == note_public_id))
         if not note:
             await message.reply("Заметка с таким ID не найдена.")
@@ -322,9 +454,6 @@ async def show_note(message: Message):
     note_public_id = parts[1].strip()
     async with Session() as session:
         actor = await get_user(session, message.from_user.id)
-        if not actor or actor.rank < 4:
-            await message.reply("⛔ Заметки доступны только с 4 ранга.")
-            return
         note = await session.scalar(select(Note).where(Note.public_id == note_public_id))
         if not note:
             await message.reply("Заметка с таким ID не найдена.")
@@ -338,9 +467,6 @@ async def show_note(message: Message):
 async def list_notes(message: Message):
     async with Session() as session:
         actor = await get_user(session, message.from_user.id)
-        if not actor or actor.rank < 4:
-            await message.reply("⛔ Заметки доступны только с 4 ранга.")
-            return
         notes = (await session.scalars(select(Note).order_by(Note.id.asc()))).all()
         note_data = [
             (str(note.id), note.title, note.body,
@@ -395,9 +521,6 @@ async def moderation_action(message: Message, action: str, required_rank: int):
     async with Session() as session:
         actor = await get_user(session, message.from_user.id)
         target = await resolve_target(message, session, target_text)
-        if not actor or actor.rank < required_rank:
-            await message.reply("⛔ Недостаточно прав.")
-            return
         if not target:
             await message.reply("Пользователь не найден. Ответь на его сообщение или укажи кастомный ID/@username.")
             return
@@ -449,9 +572,6 @@ async def change_rank(message: Message, step: int):
     async with Session() as session:
         actor = await get_user(session, message.from_user.id)
         target = await resolve_target(message, session, raw)
-        if not actor or actor.rank < 4:
-            await message.reply("⛔ Изменять ранги можно только с 4 ранга.")
-            return
         if not target or actor.rank <= target.rank:
             await message.reply("Пользователь не найден или его ранг равен/выше вашего.")
             return
@@ -511,9 +631,6 @@ async def unpunish(message: Message, action: str, required: int):
             else:
                 target = None
 
-        if not actor or actor.rank < required:
-            await message.reply("⛔ Недостаточно прав.")
-            return
         if not target or actor.rank <= target.rank:
             await message.reply("Пользователь не найден или его ранг равен/выше вашего.")
             return
@@ -734,13 +851,75 @@ async def main():
             UPDATE notes SET public_id = id::text
             WHERE public_id IS DISTINCT FROM id::text
         """))
+    async with Session() as session:
+        for command_id, (_, _, default_access) in COMMANDS.items():
+            setting = await session.get(CommandAccess, command_id)
+            if setting is None:
+                session.add(CommandAccess(command_id=command_id, min_rank=default_access))
+        await session.commit()
     bot = Bot(settings.bot_token)
     dp = Dispatcher()
     dp.message.outer_middleware(RegistrationMiddleware())
+    dp.message.outer_middleware(CommandAccessMiddleware())
 
     @dp.message(CommandStart())
     async def start(message: Message):
         await message.answer("Привет! Я бот модерации. Напиши «профиль», чтобы посмотреть свой профиль.")
+
+    @dp.message(F.text.regexp(r"(?i)^дк(?:\s|$)"))
+    async def command_access_handler(message: Message):
+        parts = (message.text or "").split()
+        async with Session() as session:
+            actor = await get_user(session, message.from_user.id)
+            if not actor or actor.rank != 5:
+                await message.reply("⛔ Настраивать доступы команд может только владелец (5 ранг).")
+                return
+            if len(parts) == 1:
+                rows = (await session.scalars(select(CommandAccess))).all()
+                access_map = {row.command_id: row.min_rank for row in rows}
+                lines = ["🔐 <b>Настройки доступов команд</b>"]
+                for command_id, (title, trigger, default) in COMMANDS.items():
+                    value = access_map.get(command_id, default)
+                    lines.append(f"<code>{command_id}</code> — {html_decoration.quote(title)} (<code>{value}</code>)")
+                await message.reply("\n".join(lines), parse_mode="HTML")
+                return
+            if not parts[1].isdigit() or int(parts[1]) not in COMMANDS:
+                await message.reply("Укажи существующий номер команды. Посмотреть список: «дк».")
+                return
+            command_id = int(parts[1])
+            setting = await session.get(CommandAccess, command_id)
+            current = setting.min_rank if setting else COMMANDS[command_id][2]
+            if len(parts) == 2:
+                await message.reply(f"Команда №{command_id} — {COMMANDS[command_id][0]}. Текущий доступ: {current}.")
+                return
+            if len(parts) != 3 or not parts[2].isdigit() or not 0 <= int(parts[2]) <= 6:
+                await message.reply("Формат: дк {номер команды} {доступ от 0 до 6}.")
+                return
+            new_access = int(parts[2])
+            if setting is None:
+                session.add(CommandAccess(command_id=command_id, min_rank=new_access))
+            else:
+                setting.min_rank = new_access
+            await session.commit()
+        await message.reply(f"✅ Доступ команды №{command_id} «{COMMANDS[command_id][0]}» установлен: {new_access}.")
+
+    @dp.message(F.text.regexp(r"(?i)^мдк\s*$"))
+    async def my_command_access_handler(message: Message):
+        async with Session() as session:
+            actor = await get_user(session, message.from_user.id)
+            rank = actor.rank if actor else 0
+            rows = (await session.scalars(select(CommandAccess))).all()
+            access_map = {row.command_id: row.min_rank for row in rows}
+        available = [
+            (command_id, meta[0]) for command_id, meta in COMMANDS.items()
+            if rank_access_allowed(rank, access_map.get(command_id, meta[2]))
+        ]
+        if not available:
+            await message.reply("У тебя пока нет доступных команд.")
+            return
+        lines = [f"🔐 <b>Твои доступные команды</b> (ранг {rank})"]
+        lines.extend(f"<code>{command_id}</code> — {html_decoration.quote(title)}" for command_id, title in available)
+        await message.reply("\n".join(lines), parse_mode="HTML")
 
     @dp.message(Command("help"))
     async def help_handler(message: Message):
@@ -819,9 +998,6 @@ async def main():
         source_id = int(parts[-1])
         async with Session() as session:
             actor = await get_user(session, message.from_user.id)
-            if not actor or actor.rank < 4:
-                await message.reply("⛔ Настраивать маршруты репортов могут только ранги 4–5.")
-                return
             if source_id == message.chat.id:
                 await message.reply("Нельзя направить репорты чата в него же.")
                 return
@@ -1036,9 +1212,6 @@ async def main():
     async def delete_handler(message: Message):
         async with Session() as session:
             actor = await get_user(session, message.from_user.id)
-            if not actor or actor.rank < 1:
-                await message.reply("⛔ Команда доступна с 1 ранга.")
-                return
         if not message.reply_to_message:
             await message.reply("Ответь на сообщение командой -смс.")
             return
@@ -1103,9 +1276,6 @@ async def main():
         normalized = normalize_link(raw)
         async with Session() as session:
             actor = await get_user(session, message.from_user.id)
-            if not actor or actor.rank < 4:
-                await message.reply("⛔ Управлять белым списком ссылок могут только ранги 4–5.")
-                return
             existing = await session.scalar(select(LinkWhitelist).where(LinkWhitelist.normalized_link == normalized))
             if existing:
                 await message.reply("Эта ссылка уже находится в белом списке.")
@@ -1120,9 +1290,6 @@ async def main():
         normalized = normalize_link(raw)
         async with Session() as session:
             actor = await get_user(session, message.from_user.id)
-            if not actor or actor.rank < 4:
-                await message.reply("⛔ Управлять белым списком ссылок могут только ранги 4–5.")
-                return
             existing = await session.scalar(select(LinkWhitelist).where(LinkWhitelist.normalized_link == normalized))
             if not existing:
                 await message.reply("Такой ссылки нет в белом списке.")
@@ -1135,9 +1302,6 @@ async def main():
     async def list_allowed_links(message: Message):
         async with Session() as session:
             actor = await get_user(session, message.from_user.id)
-            if not actor or actor.rank < 4:
-                await message.reply("⛔ Просматривать белый список могут только ранги 4–5.")
-                return
             entries = (await session.scalars(select(LinkWhitelist).order_by(LinkWhitelist.id.asc()))).all()
             values = [entry.link for entry in entries]
         if not values:
@@ -1145,6 +1309,10 @@ async def main():
             return
         safe = [html_decoration.quote(value) for value in values]
         await message.reply("🔗 <b>Общий белый список:</b>\n" + "\n".join("• " + value for value in safe), parse_mode="HTML")
+
+    @dp.message(F.text.regexp(r"(?is)^покормить(?:\s|$)"))
+    async def feed_rp_handler(message: Message):
+        await send_rp_action(message, "🍓", "покормил")
 
     @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
     async def link_guard(message: Message):
