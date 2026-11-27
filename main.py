@@ -877,7 +877,10 @@ async def main():
             if len(parts) == 1:
                 rows = (await session.scalars(select(CommandAccess))).all()
                 access_map = {row.command_id: row.min_rank for row in rows}
-                lines = ["🔐 <b>Настройки доступов команд</b>"]
+                lines = [
+                    "🔐 <b>Настройки доступов команд</b>",
+                    "0 — всем; 1–5 — с указанного ранга и выше; 6 — запрещено всем.",
+                ]
                 for command_id, (title, trigger, default) in COMMANDS.items():
                     value = access_map.get(command_id, default)
                     lines.append(f"<code>{command_id}</code> — {html_decoration.quote(title)} (<code>{value}</code>)")
