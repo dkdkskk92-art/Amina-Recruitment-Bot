@@ -919,6 +919,8 @@ async def main():
             return
         lines = [f"🔐 <b>Твои доступные команды</b> (ранг {rank})"]
         lines.extend(f"<code>{command_id}</code> — {html_decoration.quote(title)}" for command_id, title in available)
+        if rank == 5:
+            lines.append("<code>дк</code> — Настройка доступов команд")
         await message.reply("\n".join(lines), parse_mode="HTML")
 
     @dp.message(Command("help"))
