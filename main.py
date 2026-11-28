@@ -372,6 +372,8 @@ def render_welcome(template: str, people: list[dict], group_title: str, group_ur
         lambda match: match.group(2 if plural else 1),
         rendered,
     )
+    if plural:
+        rendered = rendered.replace("Здравствуйте", "Здравствуйте").replace("здравствуйте", "здравствуйте")
     names = []
     for person in people:
         name = html.escape(person["name"])
