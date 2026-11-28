@@ -1,6 +1,8 @@
 import asyncio
+import html
 import json
 import logging
+import random
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,9 +17,41 @@ from sqlalchemy import select, func, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from config import settings
-from database import Base, engine, Session, User, Chat, Warning, Mute, Ban, PunishmentLog, Note, ReportRoute, Report, LinkWhitelist, CommandAccess
+from database import (
+    Base, engine, Session, User, Chat, Warning, Mute, Ban, PunishmentLog,
+    Note, ReportRoute, Report, LinkWhitelist, CommandAccess, CurrencyAccount,
+    WelcomeSettings,
+)
 
 RANKS = {0:"Участник", 1:"Модератор I", 2:"Модератор II", 3:"Старший модератор", 4:"Главный модератор", 5:"Владелец"}
+
+RP_ACTIONS = {
+    "покормить": "покормил",
+    "передать": "передал",
+    "посмотреть": "посмотрел на",
+    "коснуться": "коснулся",
+    "окликнуть": "окликнул",
+    "обнять": "обнял",
+    "указать": "указал на",
+    "проигнорировать": "проигнорировал",
+    "подойти": "подошёл к",
+    "догнать": "догнал",
+    "заметить": "заметил",
+    "оскорбить": "оскорбил",
+    "похвалить": "похвалил",
+    "толкнуть": "толкнул",
+    "обернуться": "обернулся к",
+    "найти": "нашёл",
+    "преградить путь": "преградил путь",
+    "подозрительно изучить": "подозрительно изучил",
+    "кивнуть": "кивнул",
+    "притянуть к себе": "притянул к себе",
+    "разозлиться": "разозлился на",
+}
+
+WELCOME_RULES_URL = "https://telegra.ph/Pravila-setki--T%E1%A7%90ch%CE%BA%E1%A5%B2-%CA%99%E1%A5%B4%E1%B4%9B%CF%81%E1%A5%B1ch%E1%A5%99--i-grupp-v-nej-10-22"
+welcome_batches: dict[int, dict[int, dict]] = {}
+welcome_tasks: dict[int, asyncio.Task] = {}
 
 # Постоянные номера команд. Значения по умолчанию сохраняют прежние ограничения.
 COMMANDS = {
@@ -42,15 +76,25 @@ COMMANDS = {
     19: ("Репорт", "репорт", 0),
     20: ("Настройка репортов", "+репорты из чата", 4),
     21: ("ID чата", "ид чата", 0),
-    101: ("Покормить", "покормить", 0),
+    101: ("RP-команды", "RP", 0),
+    102: ("Фарм аур", "фармить", 0),
+    103: ("Баланс аур", "баланс", 0),
+    104: ("Настройка приветствия", "+приветствие", 5),
 }
+COMMAND_ALIASES = (
+    [(trigger, 101) for trigger in RP_ACTIONS]
+    + [("-приветствие", 104), ("!приветствие", 104), ("тест приветствия", 104)]
+)
 COMMAND_TRIGGERS = sorted(
-    ((meta[1], command_id) for command_id, meta in COMMANDS.items()),
+    [(meta[1], command_id) for command_id, meta in COMMANDS.items() if command_id != 101]
+    + COMMAND_ALIASES,
     key=lambda item: len(item[0]), reverse=True
 )
 
 def command_id_from_text(value: str) -> int | None:
     first_line = (value or "").splitlines()[0].strip().lower() if value else ""
+    if first_line.startswith("/"):
+        first_line = first_line[1:]
     for trigger, command_id in COMMAND_TRIGGERS:
         if first_line == trigger or first_line.startswith(trigger + " "):
             return command_id
@@ -274,21 +318,15 @@ async def resolve_rp_target(message: Message, session, raw: str):
         return user or await get_user(session, int(token))
     return None
 
-async def send_rp_action(message: Message, emoji: str, verb: str):
+async def send_rp_action(message: Message, trigger: str, verb: str):
     if not message.from_user or message.from_user.is_bot:
         return
     lines = (message.text or "").split("\n", 1)
     header = lines[0].strip()
-    parts = header.split(maxsplit=1)
-    target_raw = parts[1] if len(parts) > 1 else ""
+    target_raw = header[len(trigger):].strip()
     extra_raw = lines[1] if len(lines) > 1 else ""
     extra = extra_raw.strip()
-    if extra and "\n" in extra:
-        await message.reply("Дополнительный текст должен быть только на одной строке.")
-        return
-    if len(extra) > 20:
-        await message.reply("Дополнительный текст не должен превышать 20 символов.")
-        return
+
     async with Session() as session:
         actor = await get_user(session, message.from_user.id)
         target = await resolve_rp_target(message, session, target_raw)
@@ -296,7 +334,7 @@ async def send_rp_action(message: Message, emoji: str, verb: str):
             await message.reply("Не удалось определить твой профиль.")
             return
         if not target:
-            await message.reply("Пользователь не найден. Он должен хотя бы раз написать боту или появиться в группе с ботом.")
+            await message.reply("Не удалось найти второго участника. Ответь на его сообщение или укажи @username/кастомный ID.")
             return
         actor_name = user_display_name(actor)
         target_name = user_display_name(target)
@@ -304,18 +342,18 @@ async def send_rp_action(message: Message, emoji: str, verb: str):
         target_url = telegram_profile_url(target)
         await session.commit()
 
-    main_text = f"{emoji} | {actor_name} {verb} {target_name}"
-    output = main_text + (f"\nТекст: {extra}" if extra else "")
+    main_text = f"{actor_name} {verb} {target_name}"
+    output = main_text + (f"\n{extra}" if extra else "")
     entities = [
-        MessageEntity(type="text_link", offset=utf16_length(f"{emoji} | "),
+        MessageEntity(type="text_link", offset=0,
                       length=utf16_length(actor_name), url=actor_url),
-        MessageEntity(type="text_link", offset=utf16_length(f"{emoji} | {actor_name} {verb} "),
+        MessageEntity(type="text_link", offset=utf16_length(f"{actor_name} {verb} "),
                       length=utf16_length(target_name), url=target_url),
     ]
     if extra:
         leading = len(extra_raw) - len(extra_raw.lstrip())
         source_extra_offset = utf16_length(header + "\n" + extra_raw[:leading])
-        output_extra_offset = utf16_length(main_text + "\nТекст: ")
+        output_extra_offset = utf16_length(main_text + "\n")
         for entity in message.entities or []:
             if entity.type == "custom_emoji" and entity.custom_emoji_id:
                 relative = entity.offset - source_extra_offset
@@ -329,6 +367,78 @@ async def send_rp_action(message: Message, emoji: str, verb: str):
     except TelegramBadRequest:
         fallback_entities = [entity for entity in entities if entity.type != "custom_emoji"]
         await message.answer(output, entities=fallback_entities, disable_web_page_preview=True)
+
+
+def render_welcome(template: str, people: list[dict], group_title: str, group_url: str | None) -> str:
+    rendered = html.escape(template)
+    plural = len(people) >= 2
+    rendered = re.sub(
+        r"\{([^{}]*)/([^{}]*)\}",
+        lambda match: match.group(2 if plural else 1),
+        rendered,
+    )
+    names = []
+    for person in people:
+        name = html.escape(person["name"])
+        url = person.get("url")
+        names.append(f'<a href="{html.escape(url, quote=True)}">{name}</a>' if url else name)
+    names_html = ", ".join(names)
+    rendered = rendered.replace("{имя в тг + ссылка}", names_html)
+    rendered = rendered.replace("{имя в тг}", names_html)
+    safe_title = html.escape(group_title or "нашу группу")
+    if group_url:
+        group_value = f'<a href="{html.escape(group_url, quote=True)}">{safe_title}</a>'
+    else:
+        group_value = safe_title
+    rendered = rendered.replace("{название группы + ссылка на неё}", group_value)
+    rendered = rendered.replace("{название группы}", group_value)
+    rules = f'<a href="{WELCOME_RULES_URL}">правила</a>'
+    rendered = rendered.replace("{правила}", rules)
+    return rendered
+
+
+async def get_group_link(
+    bot: Bot, chat_id: int, username: str | None = None, invite_link: str | None = None
+) -> str | None:
+    if username:
+        return f"https://t.me/{username}"
+    if invite_link:
+        return invite_link
+    try:
+        return await bot.export_chat_invite_link(chat_id)
+    except Exception:
+        logging.warning("Не удалось получить ссылку-приглашение для чата %s", chat_id)
+        return None
+
+
+async def flush_welcome_batch(bot: Bot, chat_id: int):
+    await asyncio.sleep(5)
+    people = list(welcome_batches.pop(chat_id, {}).values())
+    welcome_tasks.pop(chat_id, None)
+    if not people:
+        return
+
+    async with Session() as session:
+        config = await session.get(WelcomeSettings, 1)
+        if not config or not config.enabled or not config.text:
+            return
+        template = config.text
+
+    try:
+        chat = await bot.get_chat(chat_id)
+        group_title = chat.title or "нашу группу"
+        group_url = await get_group_link(
+            bot, chat_id, chat.username, getattr(chat, "invite_link", None)
+        )
+    except Exception:
+        logging.exception("Не удалось получить данные группы %s для приветствия", chat_id)
+        return
+
+    text_value = render_welcome(template, people, group_title, group_url)
+    try:
+        await bot.send_message(chat_id, text_value, parse_mode="HTML", disable_web_page_preview=True)
+    except Exception:
+        logging.exception("Не удалось отправить приветствие в чате %s", chat_id)
 
 async def profile(message: Message):
     parts = (message.text or "").split()
@@ -853,6 +963,9 @@ async def main():
             WHERE public_id IS DISTINCT FROM id::text
         """))
     async with Session() as session:
+        welcome_config = await session.get(WelcomeSettings, 1)
+        if welcome_config is None:
+            session.add(WelcomeSettings(id=1, enabled=False, text=None))
         defaults = [
             {"command_id": command_id, "min_rank": meta[2]}
             for command_id, meta in COMMANDS.items()
@@ -930,79 +1043,257 @@ async def main():
             lines.append("<code>дк</code> — Настройка доступов команд")
         await message.reply("\n".join(lines), parse_mode="HTML")
 
+    @dp.message(F.text.regexp(r"(?is)^\+приветствие(?:\s|$)"))
+    async def set_or_show_welcome(message: Message):
+        raw = (message.text or "")[len("+приветствие"):].strip()
+        async with Session() as session:
+            config = await session.get(WelcomeSettings, 1)
+            if not raw:
+                if not config or not config.text:
+                    await message.reply("Приветствие ещё не настроено. Используй: +приветствие Текст")
+                    return
+                status = "включено" if config.enabled else "отключено"
+                await message.reply(f"Текущее приветствие ({status}):\n{config.text}")
+                return
+            if config is None:
+                config = WelcomeSettings(id=1, enabled=True, text=raw)
+                session.add(config)
+            else:
+                config.text = raw
+                config.enabled = True
+            await session.commit()
+        await message.reply("✅ Приветствие сохранено и включено для всех групп.")
+
+    @dp.message(F.text.regexp(r"(?i)^-приветствие\s*$"))
+    async def disable_welcome(message: Message):
+        async with Session() as session:
+            config = await session.get(WelcomeSettings, 1)
+            if not config or not config.text:
+                await message.reply("Сохранённого приветствия нет.")
+                return
+            config.enabled = False
+            await session.commit()
+        await message.reply("Приветствия отключены. Текст сохранён.")
+
+    @dp.message(F.text.regexp(r"(?i)^!приветствие\s*$"))
+    async def delete_welcome(message: Message):
+        async with Session() as session:
+            config = await session.get(WelcomeSettings, 1)
+            if not config or not config.text:
+                await message.reply("Сохранённого приветствия нет.")
+                return
+            config.enabled = False
+            config.text = None
+            await session.commit()
+        await message.reply("🗑 Текст приветствия удалён.")
+
+    @dp.message(F.text.regexp(r"(?i)^тест приветствия\s*$"))
+    async def test_welcome(message: Message):
+        async with Session() as session:
+            config = await session.get(WelcomeSettings, 1)
+            if not config or not config.text:
+                await message.reply("Сначала настрой приветствие командой +приветствие Текст.")
+                return
+            template = config.text
+            actor = await get_user(session, message.from_user.id)
+            actor_name = user_display_name(actor) if actor else (message.from_user.full_name or "Участник")
+            actor_url = telegram_profile_url(actor) if actor else f"tg://user?id={message.from_user.id}"
+
+        if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+            group_title = message.chat.title or "нашу группу"
+            group_url = await get_group_link(
+                message.bot, message.chat.id, message.chat.username,
+                getattr(message.chat, "invite_link", None),
+            )
+        else:
+            group_title, group_url = "Название группы", None
+
+        single = render_welcome(template, [{"name": actor_name, "url": actor_url}], group_title, group_url)
+        multiple = render_welcome(
+            template,
+            [{"name": actor_name, "url": actor_url}, {"name": "Участник 2", "url": None}],
+            group_title,
+            group_url,
+        )
+        preview = (
+            "<h1>🧪 Тест приветствия</h1>"
+            "<details><summary>Единственное число · 1 участник</summary><p>" + single.replace("\n", "<br>") + "</p></details>"
+            "<details><summary>Множественное число · 2+ участника</summary><p>" + multiple.replace("\n", "<br>") + "</p></details>"
+        )
+        await message.bot.send_rich_message(
+            chat_id=message.chat.id,
+            rich_message=InputRichMessage(html=preview)
+        )
+
+    @dp.message(F.text.regexp(r"(?i)^баланс\s*$"))
+    async def balance_handler(message: Message):
+        async with Session() as session:
+            actor = await get_user(session, message.from_user.id)
+            if not actor:
+                await message.reply("Не удалось определить твой профиль.")
+                return
+            account = await session.get(CurrencyAccount, actor.id)
+            balance = account.balance if account else 0
+        await message.reply(f"💰 Твой баланс: <b>{balance}</b> аур.", parse_mode="HTML")
+
+    @dp.message(F.text.regexp(r"(?i)^фармить\s*$"))
+    async def farm_handler(message: Message):
+        async with Session() as session:
+            actor = await get_user(session, message.from_user.id)
+            if not actor:
+                await message.reply("Не удалось определить твой профиль.")
+                return
+            await session.scalar(select(User.id).where(User.id == actor.id).with_for_update())
+            account = await session.get(CurrencyAccount, actor.id)
+            now = datetime.now(timezone.utc)
+            if account is None:
+                account = CurrencyAccount(user_id=actor.id, balance=0)
+                session.add(account)
+                await session.flush()
+            if account.last_farm_at:
+                ready_at = account.last_farm_at + timedelta(hours=5)
+                if ready_at > now:
+                    remaining_seconds = (ready_at - now).total_seconds()
+                    remaining_minutes = max(1, int((remaining_seconds + 59) // 60))
+                    hours, minutes = divmod(remaining_minutes, 60)
+                    await message.reply(f"Ты уже фармил, попробуй через {hours}:{minutes:02d}.")
+                    return
+            reward = random.randint(100, 300)
+            account.balance += reward
+            account.last_farm_at = now
+            await session.commit()
+        await message.reply(
+            f"Ты нафармил {reward} аур!\nСледующий раз доступен через 5 часов."
+        )
+
+    @dp.chat_member()
+    async def welcome_member_handler(event):
+        chat = event.chat
+        joined = event.new_chat_member
+        user = joined.user
+        if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP) or user.is_bot:
+            return
+        new_status = joined.status
+        old_status = event.old_chat_member.status
+        is_member = new_status in ("member", "administrator", "creator") or (
+            new_status == "restricted" and bool(getattr(joined, "is_member", False))
+        )
+        was_member = old_status in ("member", "administrator", "creator") or (
+            old_status == "restricted" and bool(getattr(event.old_chat_member, "is_member", False))
+        )
+        if not is_member or was_member:
+            return
+
+        async with Session() as session:
+            actor = await get_user(session, user.id)
+            if actor is None:
+                actor = User(
+                    telegram_id=user.id, username=user.username,
+                    first_name=user.first_name or "", last_name=user.last_name, rank=0
+                )
+                session.add(actor)
+            else:
+                actor.username = user.username
+                actor.first_name = user.first_name or ""
+                actor.last_name = user.last_name
+            chat_record = await session.scalar(select(Chat).where(Chat.telegram_chat_id == chat.id))
+            if chat_record is None:
+                session.add(Chat(telegram_chat_id=chat.id, title=chat.title or ""))
+            else:
+                chat_record.title = chat.title or ""
+            await session.commit()
+
+        batch = welcome_batches.setdefault(chat.id, {})
+        batch[user.id] = {
+            "name": " ".join(part for part in (user.first_name, user.last_name) if part).strip() or "Без имени",
+            "url": f"https://t.me/{user.username}" if user.username else f"tg://user?id={user.id}",
+        }
+        task = welcome_tasks.get(chat.id)
+        if task is None or task.done():
+            welcome_tasks[chat.id] = asyncio.create_task(flush_welcome_batch(bot, chat.id))
+
     @dp.message(Command("help"))
     async def help_handler(message: Message):
+        async with Session() as session:
+            actor = await get_user(session, message.from_user.id)
+            rank = actor.rank if actor else 0
+            rows = (await session.scalars(select(CommandAccess))).all()
+            access_map = {row.command_id: row.min_rank for row in rows}
+
+        help_items = {
+            1: ("👤 Профиль", ["<code>профиль</code> — открыть свой профиль.", "<code>профиль 123</code> — открыть профиль по кастомному ID.", "Ответь командой на сообщение, чтобы открыть профиль его автора."]),
+            2: ("🛡️ Модерация", ["<code>-смс</code> — удалить сообщение (ответом на него)."]),
+            3: ("🛡️ Модерация", ["<code>бан 2 часа</code> или <code>бан навсегда</code> — заблокировать участника."]),
+            4: ("🛡️ Модерация", ["<code>варн 1 день</code> — выдать предупреждение."]),
+            5: ("🛡️ Модерация", ["<code>молчи 10 минут</code> — выдать мут."]),
+            6: ("🛡️ Модерация", ["<code>говори</code> — снять мут (ответом на сообщение или указав пользователя)."]),
+            7: ("🛡️ Модерация", ["<code>разбан</code> — снять бан (ответом на сообщение или указав пользователя)."]),
+            8: ("🛡️ Модерация", ["<code>снять варн 2</code> — снять варн №2 ответом на сообщение.", "<code>снять варн @username 2</code> или <code>снять варн 123 2</code> — снять варн по username или кастомному ID."]),
+            9: ("🎖️ Ранги", ["<code>повысить</code> — повысить участника на один ранг (ответом на сообщение или указав ID/@username)."]),
+            10: ("🎖️ Ранги", ["<code>понизить</code> — понизить участника на один ранг."]),
+            11: ("👥 Администрация", ["<code>админы</code> — показать список администрации по рангам."]),
+            12: ("📝 Заметки", ["<code>+заметка Название</code>, затем текст со следующей строки — создать заметку. Название до 20 символов."]),
+            13: ("📝 Заметки", ["<code>-заметка 1</code> — удалить заметку по ID."]),
+            14: ("📝 Заметки", ["<code>заметка 1</code> — открыть заметку по ID."]),
+            15: ("📝 Заметки", ["<code>заметки</code> — показать список заметок."]),
+            16: ("🔗 Белый список ссылок", ["<code>+ссылка https://example.com</code> — добавить разрешённую ссылку."]),
+            17: ("🔗 Белый список ссылок", ["<code>-ссылка https://example.com</code> — удалить ссылку из белого списка."]),
+            18: ("🔗 Белый список ссылок", ["<code>ссылки</code> — показать общий белый список."]),
+            19: ("📨 Репорты", ["<code>репорт</code>, затем текст со следующей строки — отправить жалобу. Для жалобы на участника ответь на его сообщение."]),
+            20: ("📨 Репорты", ["<code>+репорты из чата -100...</code> — подключить группу-источник к чату администрации."]),
+            21: ("📨 Репорты", ["<code>ид чата</code> — показать Telegram ID текущей группы."]),
+            101: ("🎭 RP-команды", [
+                "<code>покормить @username</code> — «Имя1 покормил Имя2».",
+                "<code>передать @username</code> — «Имя1 передал Имя2».",
+                "<code>посмотреть @username</code>, <code>коснуться @username</code>, <code>окликнуть @username</code>, <code>обнять @username</code>.",
+                "<code>указать</code>, <code>проигнорировать</code>, <code>подойти</code>, <code>догнать</code>, <code>заметить</code>, <code>оскорбить</code>, <code>похвалить</code>, <code>толкнуть</code>, <code>обернуться</code>, <code>найти</code>, <code>преградить путь</code>, <code>подозрительно изучить</code>, <code>кивнуть</code>, <code>притянуть к себе</code>, <code>разозлиться</code> — остальные RP-действия.",
+                "Укажи @username/кастомный ID или ответь на сообщение участника. Дополнительный текст можно написать со следующей строки. Все RP-действия используют один общий номер ДК."
+            ]),
+            102: ("💰 Ауры", ["<code>фармить</code> — получить случайно от 100 до 300 аур. Повторный фарм доступен через 5 часов."]),
+            103: ("💰 Ауры", ["<code>баланс</code> — посмотреть свой баланс аур."]),
+            104: ("👋 Приветствия", [
+                "<code>+приветствие Текст</code> — установить или заменить приветствие. Можно использовать шаблонные переменные.",
+                "<code>+приветствие</code> — посмотреть сохранённое приветствие.",
+                "<code>-приветствие</code> — временно отключить приветствия.",
+                "<code>!приветствие</code> — удалить сохранённый текст.",
+                "<code>тест приветствия</code> — показать единственное и множественное число в одном сообщении."
+            ]),
+        }
+
+        groups = {}
+        for command_id, (section, descriptions) in help_items.items():
+            meta = COMMANDS.get(command_id)
+            if not meta:
+                continue
+            min_rank = access_map.get(command_id, meta[2])
+            if not rank_access_allowed(rank, min_rank):
+                continue
+            groups.setdefault(section, []).extend(descriptions)
+
         help_html = (
-            "<h1>🦋 Айзен | помощник</h1>"
-            "<blockquote>Твой помощник по управлению чатом. Выбери нужный раздел и используй команды ниже.</blockquote>"
-            "<details><summary>👥 Администрация</summary>"
-            "<p><code>админы</code> — показать список администрации по рангам и ссылки на Telegram.</p></details>"
-            "<details><summary>👤 Профили</summary>"
-            "<p><code>профиль</code> — открыть свой профиль.<br>"
-            "<code>профиль 123</code> — открыть профиль по кастомному ID.<br>"
-            "При ответе на сообщение командой <code>профиль</code> откроется профиль его автора.<br>"
-            "Профиль отображается текстом, без фотографий.</p></details>"
-            "<details><summary>🛡️ Модерация</summary>"
-            "<p><code>варн 1 день</code> — выдать предупреждение.<br>"
-            "<code>молчи 10 минут</code> — выдать мут.<br>"
-            "<code>бан навсегда</code> — заблокировать пользователя.<br>"
-            "<code>говори</code> — снять мут.<br>"
-            "<code>разбан</code> — снять бан.<br>"
-            "<code>снять варн 2</code> — снять варн №2 (ответом на сообщение).<br>"
-            "<code>снять варн @username 2</code> — снять варн №2 у пользователя.<br>"
-            "<code>снять варн 123 2</code> — где 123 — кастомный ID пользователя.<br>"
-            "<code>-смс</code> — удалить сообщение (ответом на него).</p></details>"
-            "<details><summary>🎖️ Ранги и полномочия</summary>"
-            "<p>0 — Участник<br>1 — Модератор I<br>2 — Модератор II<br>"
-            "3 — Старший модератор<br>4 — Главный модератор<br>5 — Владелец<br><br>"
-            "<code>повысить</code> / <code>понизить</code> — изменить ранг на один уровень.<br>"
-            "Менять ранг можно только пользователю ниже вас.</p></details>"
-            "<details><summary>📝 Заметки · ранги 4–5</summary>"
-            "<p><code>+заметка Название</code>, затем текст со следующей строки — создать заметку.<br>"
-            "Название — до 20 символов, форматирование сохраняется.<br>"
-            "<code>заметки</code> — показать список.<br>"
-            "<code>заметка 1</code> — открыть заметку по ID.<br>"
-            "<code>-заметка 1</code> — удалить заметку по ID.<br>"
-            "ID заметки — уникальный порядковый номер записи.</p></details>"
-            "<details><summary>⏱️ Сроки наказаний</summary>"
-            "<p>Поддерживаются секунды, минуты, часы, дни и <code>навсегда</code>.<br>"
-            "Примеры: <code>30 секунд</code>, <code>10 минут</code>, <code>2 часа</code>, <code>1 день</code>.<br>"
-            "Третий активный варн автоматически выдаёт мут на 1 час.</p></details>"
-            "<details><summary>📌 Как указать пользователя</summary>"
-            "<p>Ответь командой на сообщение пользователя или укажи его кастомный ID / <code>@username</code>.<br>"
-            "Пример: <code>молчи 10 минут @username</code>.<br>"
-            "Нельзя наказать себя или пользователя с равным/более высоким рангом.</p></details>"
-            "<details><summary>🔐 Права доступа</summary>"
-            "<p>Начальные доступы команд сохраняют прежние ранги и могут быть настроены владельцем через ДК.<br>"
-            "<code>дк</code> — список команд и их номеров (только владелец).<br>"
-            "<code>дк 3</code> — посмотреть доступ команды №3.<br>"
-            "<code>дк 3 4</code> — установить доступ с 4 ранга.<br>"
-            "0 — всем; 1–5 — с указанного ранга и выше; 6 — запрещено всем.<br>"
-            "<code>мдк</code> — показать только доступные тебе команды.</p></details>"
-            "<details><summary>🎮 Игровые RP-команды</summary>"
-            "<p><code>покормить @username</code> или ответом на сообщение — игровое действие.<br>"
-            "Можно указать пользователя по кастомному ID или Telegram ID.<br>"
-            "Следующая строка необязательна, до 20 символов; поддерживаются Premium Emoji.<br>"
-            "Отдельный RP-бот использует ту же базу данных.</p></details>"
-            "<details><summary>📨 Репорты</summary>"
-            "<p><code>ид чата</code> — показать ID группы.<br>"
-            "В чате администрации: <code>+репорты из чата -100...</code> — подключить группу-источник.<br>"
-            "Любой участник может отправить <code>репорт</code>, ответив на сообщение нарушителя.<br>"
-            "От одного участника может быть только один активный репорт в конкретной группе.</p></details>"
-            "<details><summary>🔗 Белый список ссылок · ранги 4–5</summary>"
-            "<p><code>+ссылка https://example.com</code> — добавить разрешённую ссылку.<br>"
-            "<code>-ссылка https://example.com</code> — удалить ссылку.<br>"
-            "<code>Ссылки</code> — показать общий список (команда работает в группе).</p></details>"
-            "<details><summary>⚠️ Защита чата</summary>"
-            "<p>Айзен проверяет ссылки в сообщениях и подписях к медиа, удаляет запрещённые ссылки и применяет меры к отправителю согласно настройкам защиты.<br>"
-            "Для работы модерации боту нужны права администратора на удаление сообщений и блокировку участников.</p></details>"
+            f"<h1>🦋 Айзен | помощник</h1>"
+            f"<blockquote>Твой ранг: {rank} — {html_decoration.quote(RANKS.get(rank, 'Участник'))}. Ниже только команды, доступные тебе с учётом текущих настроек ДК.</blockquote>"
         )
+        for section, descriptions in groups.items():
+            help_html += f"<details><summary>{section}</summary><p>" + "<br>".join(descriptions) + "</p></details>"
+
+        help_html += (
+            "<details><summary>🔐 Общие команды доступа</summary>"
+            "<p><code>/help</code> — эта справка с учётом твоего ранга и ДК.<br>"
+            "<code>мдк</code> — показать только доступные тебе команды.</p></details>"
+        )
+        if rank == 5:
+            help_html += (
+                "<details><summary>🔐 Настройка ДК · владелец</summary>"
+                "<p><code>дк</code> — список постоянных номеров и текущих настроек.<br>"
+                "<code>дк 3</code> — посмотреть доступ команды №3.<br>"
+                "<code>дк 3 4</code> — установить доступ с 4 ранга.<br>"
+                "0 — всем; 1–5 — с указанного ранга и выше; 6 — запрещено всем.</p></details>"
+            )
         await message.bot.send_rich_message(
             chat_id=message.chat.id,
             rich_message=InputRichMessage(html=help_html)
         )
-
-
     @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}) & F.text.regexp(r"(?i)^ид чата\s*$"))
     async def chat_id_handler(message: Message):
         await message.reply(f"ID этого чата равен <code>{message.chat.id}</code>", parse_mode="HTML")
@@ -1325,9 +1616,16 @@ async def main():
         safe = [html_decoration.quote(value) for value in values]
         await message.reply("🔗 <b>Общий белый список:</b>\n" + "\n".join("• " + value for value in safe), parse_mode="HTML")
 
-    @dp.message(F.text.regexp(r"(?is)^покормить(?:\s|$)"))
-    async def feed_rp_handler(message: Message):
-        await send_rp_action(message, "🍓", "покормил")
+    def make_rp_handler(trigger: str, verb: str):
+        async def handler(message: Message):
+            await send_rp_action(message, trigger, verb)
+        return handler
+
+    for trigger, verb in RP_ACTIONS.items():
+        dp.message.register(
+            make_rp_handler(trigger, verb),
+            F.text.regexp(rf"(?is)^{re.escape(trigger)}(?:\s|$)")
+        )
 
     @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
     async def link_guard(message: Message):

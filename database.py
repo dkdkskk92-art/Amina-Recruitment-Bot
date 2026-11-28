@@ -125,6 +125,20 @@ class LinkWhitelist(Base):
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class CurrencyAccount(Base):
+    __tablename__ = "currency_accounts"
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    balance: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_farm_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WelcomeSettings(Base):
+    __tablename__ = "welcome_settings"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class CommandAccess(Base):
     __tablename__ = "command_access"
     command_id: Mapped[int] = mapped_column(Integer, primary_key=True)
