@@ -1155,7 +1155,7 @@ async def main():
             account.last_farm_at = now
             await session.commit()
         await message.reply(
-            f"Ты нафармил {reward} аур!\\nСледующий раз доступен через 5 часов."
+            f"Ты нафармил {reward} аур!\nСледующий раз доступен через 5 часов."
         )
 
     @dp.chat_member()
