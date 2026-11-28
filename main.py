@@ -1033,7 +1033,7 @@ async def main():
             lines.append("<code>дк</code> — Настройка доступов команд")
         await message.reply("\n".join(lines), parse_mode="HTML")
 
-    @dp.message(F.text.regexp(r"(?is)^\\+приветствие(?:\\s|$)"))
+    @dp.message(F.text.regexp(r"(?is)^\+приветствие(?:\s|$)"))
     async def set_or_show_welcome(message: Message):
         raw = (message.text or "")[len("+приветствие"):].strip()
         async with Session() as session:
@@ -1054,7 +1054,7 @@ async def main():
             await session.commit()
         await message.reply("✅ Приветствие сохранено и включено для всех групп.")
 
-    @dp.message(F.text.regexp(r"(?i)^-приветствие\\s*$"))
+    @dp.message(F.text.regexp(r"(?i)^-приветствие\s*$"))
     async def disable_welcome(message: Message):
         async with Session() as session:
             config = await session.get(WelcomeSettings, 1)
@@ -1065,7 +1065,7 @@ async def main():
             await session.commit()
         await message.reply("Приветствия отключены. Текст сохранён.")
 
-    @dp.message(F.text.regexp(r"(?i)^!приветствие\\s*$"))
+    @dp.message(F.text.regexp(r"(?i)^!приветствие\s*$"))
     async def delete_welcome(message: Message):
         async with Session() as session:
             config = await session.get(WelcomeSettings, 1)
@@ -1077,7 +1077,7 @@ async def main():
             await session.commit()
         await message.reply("🗑 Текст приветствия удалён.")
 
-    @dp.message(F.text.regexp(r"(?i)^тест приветствия\\s*$"))
+    @dp.message(F.text.regexp(r"(?i)^тест приветствия\s*$"))
     async def test_welcome(message: Message):
         async with Session() as session:
             config = await session.get(WelcomeSettings, 1)
@@ -1112,7 +1112,7 @@ async def main():
             rich_message=InputRichMessage(html=preview)
         )
 
-    @dp.message(F.text.regexp(r"(?i)^баланс\\s*$"))
+    @dp.message(F.text.regexp(r"(?i)^баланс\s*$"))
     async def balance_handler(message: Message):
         async with Session() as session:
             actor = await get_user(session, message.from_user.id)
@@ -1123,7 +1123,7 @@ async def main():
             balance = account.balance if account else 0
         await message.reply(f"💰 Твой баланс: <b>{balance}</b> аур.", parse_mode="HTML")
 
-    @dp.message(F.text.regexp(r"(?i)^фармить\\s*$"))
+    @dp.message(F.text.regexp(r"(?i)^фармить\s*$"))
     async def farm_handler(message: Message):
         async with Session() as session:
             actor = await get_user(session, message.from_user.id)
@@ -1610,7 +1610,7 @@ async def main():
     for trigger, verb in RP_ACTIONS.items():
         dp.message.register(
             make_rp_handler(trigger, verb),
-            F.text.regexp(rf"(?is)^{re.escape(trigger)}(?:\\s|$)")
+            F.text.regexp(rf"(?is)^{re.escape(trigger)}(?:\s|$)")
         )
 
     @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
