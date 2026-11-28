@@ -125,8 +125,6 @@ class LinkWhitelist(Base):
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-
-
 class CurrencyAccount(Base):
     __tablename__ = "currency_accounts"
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
