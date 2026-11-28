@@ -1108,8 +1108,8 @@ async def main():
         )
         preview = (
             "<h1>🧪 Тест приветствия</h1>"
-            "<details><summary>Единственное число · 1 участник</summary><p>" + single.replace("\\n", "<br>") + "</p></details>"
-            "<details><summary>Множественное число · 2+ участника</summary><p>" + multiple.replace("\\n", "<br>") + "</p></details>"
+            "<details><summary>Единственное число · 1 участник</summary><p>" + single.replace("\n", "<br>") + "</p></details>"
+            "<details><summary>Множественное число · 2+ участника</summary><p>" + multiple.replace("\n", "<br>") + "</p></details>"
         )
         await message.bot.send_rich_message(
             chat_id=message.chat.id,
