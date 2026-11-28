@@ -392,9 +392,13 @@ def render_welcome(template: str, people: list[dict], group_title: str, group_ur
     return rendered
 
 
-async def get_group_link(bot: Bot, chat_id: int, username: str | None = None) -> str | None:
+async def get_group_link(
+    bot: Bot, chat_id: int, username: str | None = None, invite_link: str | None = None
+) -> str | None:
     if username:
         return f"https://t.me/{username}"
+    if invite_link:
+        return invite_link
     try:
         return await bot.export_chat_invite_link(chat_id)
     except Exception:
@@ -418,7 +422,7 @@ async def flush_welcome_batch(bot: Bot, chat_id: int):
     try:
         chat = await bot.get_chat(chat_id)
         group_title = chat.title or "нашу группу"
-        group_url = await get_group_link(bot, chat_id, chat.username)
+        group_url = await get_group_link(bot, chat_id, chat.username, getattr(chat, 'invite_link', None))
     except Exception:
         logging.exception("Не удалось получить данные группы %s для приветствия", chat_id)
         return
@@ -1091,7 +1095,7 @@ async def main():
 
         if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
             group_title = message.chat.title or "нашу группу"
-            group_url = await get_group_link(message.bot, message.chat.id, message.chat.username)
+            group_url = await get_group_link(message.bot, message.chat.id, message.chat.username, getattr(message.chat, 'invite_link', None))
         else:
             group_title, group_url = "Название группы", None
 
