@@ -42,7 +42,6 @@ COMMANDS = {
     19: ("Репорт", "репорт", 0),
     20: ("Настройка репортов", "+репорты из чата", 4),
     21: ("ID чата", "ид чата", 0),
-    101: ("Покормить", "покормить", 0),
 }
 COMMAND_TRIGGERS = sorted(
     ((meta[1], command_id) for command_id, meta in COMMANDS.items()),
