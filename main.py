@@ -1330,10 +1330,6 @@ async def main():
         safe = [html_decoration.quote(value) for value in values]
         await message.reply("🔗 <b>Общий белый список:</b>\n" + "\n".join("• " + value for value in safe), parse_mode="HTML")
 
-    @dp.message(F.text.regexp(r"(?is)^покормить(?:\s|$)"))
-    async def feed_rp_handler(message: Message):
-        await send_rp_action(message, "🍓", "покормил")
-
     @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
     async def link_guard(message: Message):
         if not message.from_user:
