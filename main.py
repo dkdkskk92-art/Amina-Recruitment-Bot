@@ -17,7 +17,11 @@ from sqlalchemy import select, func, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from config import settings
-from database import Base, engine, Session, User, Chat, Warning, Mute, Ban, PunishmentLog, Note, ReportRoute, Report, LinkWhitelist, CommandAccess, CurrencyAccount, WelcomeSettings
+from database import (
+    Base, engine, Session, User, Chat, Warning, Mute, Ban, PunishmentLog,
+    Note, ReportRoute, Report, LinkWhitelist, CommandAccess, CurrencyAccount,
+    WelcomeSettings,
+)
 
 RANKS = {0:"Участник", 1:"Модератор I", 2:"Модератор II", 3:"Старший модератор", 4:"Главный модератор", 5:"Владелец"}
 
@@ -341,7 +345,7 @@ async def send_rp_action(message: Message, trigger: str, verb: str):
     main_text = f"{actor_name} {verb} {target_name}"
     output = main_text + (f"\n{extra}" if extra else "")
     entities = [
-        MessageEntity(type="text_link", offset=utf16_length(""),
+        MessageEntity(type="text_link", offset=0,
                       length=utf16_length(actor_name), url=actor_url),
         MessageEntity(type="text_link", offset=utf16_length(f"{actor_name} {verb} "),
                       length=utf16_length(target_name), url=target_url),
@@ -423,7 +427,9 @@ async def flush_welcome_batch(bot: Bot, chat_id: int):
     try:
         chat = await bot.get_chat(chat_id)
         group_title = chat.title or "нашу группу"
-        group_url = await get_group_link(bot, chat_id, chat.username, getattr(chat, 'invite_link', None))
+        group_url = await get_group_link(
+            bot, chat_id, chat.username, getattr(chat, "invite_link", None)
+        )
     except Exception:
         logging.exception("Не удалось получить данные группы %s для приветствия", chat_id)
         return
@@ -969,7 +975,6 @@ async def main():
         )
         await session.commit()
     bot = Bot(settings.bot_token)
-    message_bot = bot
     dp = Dispatcher()
     dp.message.outer_middleware(RegistrationMiddleware())
     dp.message.outer_middleware(CommandAccessMiddleware())
@@ -1096,7 +1101,10 @@ async def main():
 
         if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
             group_title = message.chat.title or "нашу группу"
-            group_url = await get_group_link(message.bot, message.chat.id, message.chat.username, getattr(message.chat, 'invite_link', None))
+            group_url = await get_group_link(
+                message.bot, message.chat.id, message.chat.username,
+                getattr(message.chat, "invite_link", None),
+            )
         else:
             group_title, group_url = "Название группы", None
 
@@ -1202,7 +1210,7 @@ async def main():
         }
         task = welcome_tasks.get(chat.id)
         if task is None or task.done():
-            welcome_tasks[chat.id] = asyncio.create_task(flush_welcome_batch(message_bot, chat.id))
+            welcome_tasks[chat.id] = asyncio.create_task(flush_welcome_batch(bot, chat.id))
 
     @dp.message(Command("help"))
     async def help_handler(message: Message):
